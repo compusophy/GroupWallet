@@ -52,18 +52,18 @@ pnpm dev
 
 ```
 next-wagmi-starter/
-â”œâ”€â”€ src/
-â”‚   â”œâ”€â”€ app/              # Next.js App Router pages
-â”‚   â”‚   â”œâ”€â”€ layout.tsx    # Root layout
-â”‚   â”‚   â”œâ”€â”€ page.tsx      # Home page
-â”‚   â”‚   â”œâ”€â”€ providers.tsx # Wagmi & React Query providers
-â”‚   â”‚   â””â”€â”€ globals.css   # Global styles
-â”‚   â”œâ”€â”€ components/       # React components
-â”‚   â”‚   â””â”€â”€ ui/          # shadcn/ui components
-â”‚   â”œâ”€â”€ lib/             # Utility functions
-â”‚   â””â”€â”€ wagmi.ts         # Wagmi configuration
-â”œâ”€â”€ public/              # Static assets
-â””â”€â”€ package.json        # Dependencies
+├── src/
+│   ├── app/              # Next.js App Router pages
+│   │   ├── layout.tsx    # Root layout
+│   │   ├── page.tsx      # Home page
+│   │   ├── providers.tsx # Wagmi & React Query providers
+│   │   └── globals.css   # Global styles
+│   ├── components/       # React components
+│   │   └── ui/          # shadcn/ui components
+│   ├── lib/             # Utility functions
+│   └── wagmi.ts         # Wagmi configuration
+├── public/              # Static assets
+└── package.json        # Dependencies
 ```
 
 ## Configuration
