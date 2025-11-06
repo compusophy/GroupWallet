@@ -1,6 +1,15 @@
 import { NextResponse } from 'next/server'
 import { base } from 'wagmi/chains'
-import { createPublicClient, http, type Hash, parseEther, formatEther, isAddress } from 'viem'
+import {
+  createPublicClient,
+  http,
+  type Hash,
+  parseEther,
+  formatEther,
+  isAddress,
+  TransactionReceiptNotFoundError,
+  TransactionNotFoundError,
+} from 'viem'
 
 import { recordSuccessfulTransaction } from '@/lib/redis'
 import { getTreasuryAddress } from '@/lib/treasury'
@@ -10,6 +19,9 @@ const DEFAULT_SEND_AMOUNT_ETH = '0.0001'
 const DEFAULT_CONFIRMATIONS = 1
 const BIGINT_ZERO = BigInt(0)
 const BIGINT_ONE = BigInt(1)
+const MAX_RECEIPT_RETRIES = 5
+const MAX_TRANSACTION_RETRIES = 5
+const RETRY_DELAY_MS = 1500
 
 const baseRpcUrl = process.env.BASE_RPC_URL ?? DEFAULT_BASE_RPC_URL
 const requiredAmountEth = process.env.NEXT_PUBLIC_SEND_AMOUNT_ETH ?? DEFAULT_SEND_AMOUNT_ETH
@@ -39,6 +51,46 @@ const publicClient = createPublicClient({
   transport: http(baseRpcUrl),
 })
 
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function getReceiptWithRetry(hash: Hash) {
+  let attempt = 0
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await publicClient.getTransactionReceipt({ hash })
+    } catch (error) {
+      if (error instanceof TransactionReceiptNotFoundError && attempt < MAX_RECEIPT_RETRIES) {
+        attempt += 1
+        await wait(RETRY_DELAY_MS * attempt)
+        continue
+      }
+      throw error
+    }
+  }
+}
+
+async function getTransactionWithRetry(hash: Hash) {
+  let attempt = 0
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      return await publicClient.getTransaction({ hash })
+    } catch (error) {
+      if (error instanceof TransactionNotFoundError && attempt < MAX_TRANSACTION_RETRIES) {
+        attempt += 1
+        await wait(RETRY_DELAY_MS * attempt)
+        continue
+      }
+      throw error
+    }
+  }
+}
+
 function isHash(value: unknown): value is Hash {
   return typeof value === 'string' && /^0x[a-fA-F0-9]{64}$/.test(value)
 }
@@ -56,7 +108,7 @@ export async function POST(request: Request) {
 
     const hash = body.hash
 
-    const receipt = await publicClient.getTransactionReceipt({ hash })
+    const receipt = await getReceiptWithRetry(hash)
 
     if (receipt.status !== 'success') {
       return NextResponse.json(
@@ -91,7 +143,7 @@ export async function POST(request: Request) {
       )
     }
 
-    const transaction = await publicClient.getTransaction({ hash })
+    const transaction = await getTransactionWithRetry(hash)
 
     if (!transaction) {
       return NextResponse.json(

@@ -8,7 +8,7 @@ import {
   useSendTransaction,
   useWaitForTransactionReceipt,
 } from 'wagmi'
-import { Wallet, LogOut, Copy, Check, Send, BarChart3, Vault, Vote, ExternalLink } from 'lucide-react'
+import { Wallet, LogOut, Copy, Check, Send, BarChart3, Vote, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -29,15 +29,12 @@ import { base } from 'wagmi/chains'
 
 // Lazy load dialog components for better initial load performance
 const PlatformAnalytics = lazy(() => import('@/components/platform-analytics').then(m => ({ default: m.PlatformAnalytics })))
-const TreasuryOverview = lazy(() => import('@/components/treasury-overview').then(m => ({ default: m.TreasuryOverview })))
 const VotingSection = lazy(() => import('@/components/voting-section').then(m => ({ default: m.VotingSection })))
 
 // Import vault assets component directly for home page display
 import { VaultAssets } from '@/components/vault-assets'
 
 const FALLBACK_SEND_AMOUNT = '0.0001' as const
-const BASE_EXPLORER_TX_URL = 'https://basescan.org/tx/'
-
 type SendConfig = {
   chainId: number
   valueEth: string
@@ -49,10 +46,6 @@ type SendConfig = {
 
 function formatAddress(address: string) {
   return `${address.slice(0, 8)}...${address.slice(-6)}`
-}
-
-function formatHash(hash: `0x${string}`) {
-  return `${hash.slice(0, 8)}...${hash.slice(-6)}`
 }
 
 function App() {
@@ -102,16 +95,11 @@ function App() {
   const [hasServerSynced, setHasServerSynced] = useState(false)
   const [accountDialogOpen, setAccountDialogOpen] = useState(false)
   const [analyticsDialogOpen, setAnalyticsDialogOpen] = useState(false)
-  const [treasuryDialogOpen, setTreasuryDialogOpen] = useState(false)
-  const [depositDialogOpen, setDepositDialogOpen] = useState(false)
   const [votingDialogOpen, setVotingDialogOpen] = useState(false)
 
   // Preload components on hover for faster dialog opening
   const preloadAnalytics = () => {
     import('@/components/platform-analytics')
-  }
-  const preloadTreasury = () => {
-    import('@/components/treasury-overview')
   }
   const preloadVoting = () => {
     import('@/components/voting-section')
@@ -121,7 +109,6 @@ function App() {
   useEffect(() => {
     const timer = setTimeout(() => {
       preloadAnalytics()
-      preloadTreasury()
       preloadVoting()
     }, 2000) // Preload after 2 seconds
     return () => clearTimeout(timer)
@@ -176,7 +163,6 @@ function App() {
     isPending: isWaitingForReceipt,
     isSuccess: isReceiptSuccess,
     error: receiptError,
-    status: receiptStatus,
   } = useWaitForTransactionReceipt({
     chainId: (sendConfig?.chainId ?? base.id) as typeof base.id,
     hash: txHash,
@@ -244,17 +230,31 @@ function App() {
   const isConnected = account.status === 'connected'
   const isOnBase = sendConfig ? targetChainId === sendConfig.chainId : false
   const isRecipientReady = Boolean(treasuryAddress)
-  const sendErrorMessage = (() => {
-    if (txError) return txError
-    if (sendError && typeof sendError === 'object' && 'shortMessage' in sendError) {
-      const shortMessage = (sendError as { shortMessage?: string }).shortMessage
-      if (shortMessage) return shortMessage
-    }
-    return sendError?.message ?? null
-  })()
-  const receiptErrorMessage = receiptError?.message ?? null
-  const explorerUrl = txHash ? `${BASE_EXPLORER_TX_URL}${txHash}` : null
   const isAwaitingConfirmation = Boolean(isWaitingForReceipt && txHash)
+
+  const depositButtonDisabled = isConnected
+    ? !sendConfig ||
+      configLoading ||
+      !isOnBase ||
+      !isRecipientReady ||
+      isSending ||
+      isAwaitingConfirmation ||
+      serverStatus === 'pending'
+    : false
+
+  const depositButtonLabel = (() => {
+    if (!isConnected) return 'Connect wallet'
+    if (configLoading) return 'Preparing deposit...'
+    if (configError) return 'Retry deposit setup'
+    if (sendConfig && !isOnBase) return 'Switch to Base'
+    if (!isRecipientReady) return 'Vault unavailable'
+    if (isSending) return 'Sending...'
+    if (isAwaitingConfirmation) return 'Confirming...'
+    if (serverStatus === 'pending') return 'Syncing...'
+    if (serverStatus === 'error' || txError || receiptError || sendError) return 'Retry deposit'
+    if (!sendConfig) return 'Deposit unavailable'
+    return `Deposit ${requiredAmountLabel} ETH`
+  })()
 
   const handleCopyAddress = () => {
     const address = account.addresses?.[0]
@@ -309,7 +309,7 @@ function App() {
 
       
       {/* Main Content Area */}
-      <div className="pt-20 md:pt-28 px-4 md:px-8 pb-8">
+      <div className="pt-20 md:pt-28 px-4 md:px-8 pb-32">
         <div className="mx-auto max-w-5xl space-y-8">
           {/* Vault Assets - At the top */}
           <div className="max-w-2xl mx-auto space-y-4">
@@ -364,27 +364,6 @@ function App() {
             type="button"
             variant="outline"
             className="w-full justify-start gap-3 h-auto py-3 px-4"
-            onClick={() => setTreasuryDialogOpen(true)}
-            onMouseEnter={preloadTreasury}
-          >
-            <Vault className="h-5 w-5 flex-shrink-0" />
-            <span className="text-sm font-medium">Vault Overview</span>
-          </Button>
-          
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full justify-start gap-3 h-auto py-3 px-4"
-            onClick={() => setDepositDialogOpen(true)}
-          >
-            <Send className="h-5 w-5 flex-shrink-0" />
-            <span className="text-sm font-medium">Deposit ETH</span>
-          </Button>
-          
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full justify-start gap-3 h-auto py-3 px-4"
             onClick={() => setVotingDialogOpen(true)}
             onMouseEnter={preloadVoting}
           >
@@ -392,6 +371,29 @@ function App() {
             <span className="text-sm font-medium">Allocation Vote</span>
           </Button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-4 py-4">
+        <div className="mx-auto max-w-5xl flex justify-center">
+          <div className="w-full md:w-2/3">
+            <Button
+              type="button"
+              className="w-full flex items-center justify-center gap-2"
+              disabled={depositButtonDisabled}
+              onClick={() => {
+                if (!isConnected) {
+                  setAccountDialogOpen(true)
+                  return
+                }
+
+                void handleSendTransaction()
+              }}
+            >
+              <Send className="h-5 w-5" />
+              <span>{depositButtonLabel}</span>
+            </Button>
           </div>
         </div>
       </div>
@@ -410,110 +412,6 @@ function App() {
           </Suspense>
         </DialogContent>
       </Dialog>
-
-      <Dialog open={treasuryDialogOpen} onOpenChange={setTreasuryDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Vault className="h-5 w-5" />
-              Vault Overview
-            </DialogTitle>
-            <DialogDescription>Breakdown of the group wallet holdings.</DialogDescription>
-          </DialogHeader>
-          <Suspense fallback={<p className="text-sm text-muted-foreground">Loading treasury data...</p>}>
-            <TreasuryOverview />
-          </Suspense>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={depositDialogOpen} onOpenChange={setDepositDialogOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Send className="h-5 w-5" />
-              Deposit ETH
-            </DialogTitle>
-            <DialogDescription>Transfer {requiredAmountLabel} ETH to Vault</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <form
-              className="space-y-3"
-              onSubmit={(event) => {
-                event.preventDefault()
-                void handleSendTransaction()
-              }}
-            >
-              <Button
-                type="submit"
-                className="w-full"
-                disabled={
-                  !sendConfig ||
-                  configLoading ||
-                  !isConnected ||
-                  !isOnBase ||
-                  !isRecipientReady ||
-                  isSending ||
-                  isAwaitingConfirmation ||
-                  serverStatus === 'pending'
-                }
-              >
-                {serverStatus === 'pending'
-                  ? 'Syncing...'
-                  : isAwaitingConfirmation
-                    ? 'Confirming...'
-                    : isSending
-                      ? 'Sending...'
-                      : 'Send'}
-              </Button>
-            </form>
-
-            {configLoading && (
-              <p className="text-xs text-muted-foreground">Loading send configuration...</p>
-            )}
-            {configError && <div className="text-xs text-destructive">{configError}</div>}
-            {!isConnected && (
-              <p className="text-xs text-muted-foreground">Connect your wallet to send a transaction.</p>
-            )}
-            {isConnected && sendConfig && !isOnBase && (
-              <p className="text-xs text-amber-500">Switch to the Base network to continue.</p>
-            )}
-            {sendErrorMessage && (
-              <div className="text-xs text-destructive">{sendErrorMessage}</div>
-            )}
-            {txError && !sendErrorMessage && (
-              <div className="text-xs text-destructive">{txError}</div>
-            )}
-            {txHash && (
-              <div className="text-xs text-muted-foreground">
-                Transaction hash:{' '}
-                <a
-                  href={explorerUrl ?? '#'}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary underline"
-                >
-                  {formatHash(txHash)}
-                </a>
-              </div>
-            )}
-            {isReceiptSuccess && transactionReceipt && (
-              <p className="text-xs text-green-600">
-                Confirmed in block {Number(transactionReceipt.blockNumber).toLocaleString()}.
-              </p>
-            )}
-            {receiptErrorMessage && (
-              <div className="text-xs text-destructive">{receiptErrorMessage}</div>
-            )}
-            {serverStatus === 'success' && (
-              <p className="text-xs text-green-600">Server sync complete.</p>
-            )}
-            {serverStatus === 'error' && serverError && (
-              <div className="text-xs text-destructive">{serverError}</div>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={votingDialogOpen} onOpenChange={setVotingDialogOpen}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>

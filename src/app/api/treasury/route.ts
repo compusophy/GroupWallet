@@ -5,6 +5,9 @@ import { privateKeyToAccount } from 'viem/accounts'
 
 import { getTreasuryConfig, getTreasuryPrivateKey, type TreasuryAssetConfig } from '@/lib/treasury'
 
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 // Base mainnet RPC endpoint - use BASE_RPC_URL if available, otherwise use public Base RPC
 const baseRpcUrl = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org'
 
@@ -19,6 +22,17 @@ const ERC20_ABI = [
 ] as const
 
 type PriceMap = Record<string, number>
+
+type BalanceSnapshot = {
+  blockNumber: string | null
+  blockHash: string | null
+  balances: Record<string, {
+    balanceWei: string
+    balanceFormatted: string
+  }>
+}
+
+let lastSnapshot: BalanceSnapshot | null = null
 
 async function fetchPrices(priceIds: string[]): Promise<PriceMap> {
   if (priceIds.length === 0) {
@@ -74,11 +88,42 @@ export async function GET() {
 
     const checksummedWalletAddress = getAddress(walletAddress)
 
+    const [latestBlock, finalizedBlock] = await Promise.all([
+      client.getBlock({ blockTag: 'latest' }),
+      client
+        .getBlock({ blockTag: 'finalized' })
+        .catch((error) => {
+          console.warn('Failed to load finalized block. Falling back to latest.', error)
+          return null
+        }),
+    ])
+
+    const blockNumber = latestBlock.number
+    const blockHash = latestBlock.hash
+    const blockTimestamp = latestBlock.timestamp
+
+    const finalizedBlockNumber = finalizedBlock?.number ?? null
+
+    console.log('Fetching treasury balances', {
+      walletAddress: checksummedWalletAddress,
+      latestBlockNumber: typeof blockNumber === 'bigint' ? blockNumber.toString() : null,
+      latestBlockHash: blockHash,
+      latestBlockTimestamp: typeof blockTimestamp === 'bigint' ? Number(blockTimestamp) : null,
+      finalizedBlockNumber: typeof finalizedBlockNumber === 'bigint' ? finalizedBlockNumber.toString() : null,
+      assets: config.assets.map((asset) => ({ id: asset.id, symbol: asset.symbol, type: asset.type, address: asset.address ?? null })),
+      lastSnapshot,
+    })
+
     const rawBalances = await Promise.all(
       config.assets.map(async (asset) => {
         try {
           if (asset.type === 'native') {
             const balance = await client.getBalance({ address: checksummedWalletAddress })
+            console.log('Loaded native balance', {
+              symbol: asset.symbol,
+              balance: balance.toString(),
+              formatted: formatUnits(balance, asset.decimals),
+            })
             return { asset, balance }
           }
 
@@ -107,7 +152,12 @@ export async function GET() {
             args: [checksummedWalletAddress],
           })
 
-          console.log(`Loaded balance for ${asset.symbol}: ${balance.toString()} (${formatUnits(balance, asset.decimals)} ${asset.symbol})`)
+          console.log('Loaded token balance', {
+            symbol: asset.symbol,
+            balance: balance.toString(),
+            formatted: formatUnits(balance, asset.decimals),
+            blockNumber: typeof blockNumber === 'bigint' ? blockNumber.toString() : null,
+          })
           return { asset, balance: balance ?? BigInt(0) }
         } catch (error: any) {
           // Log all errors for debugging, but still return BigInt(0) to not break the API
@@ -170,6 +220,50 @@ export async function GET() {
       }))
       .sort((a, b) => (b.usdValue ?? 0) - (a.usdValue ?? 0))
 
+    const snapshot: BalanceSnapshot = {
+      blockNumber: typeof blockNumber === 'bigint' ? blockNumber.toString() : null,
+      blockHash,
+      balances: breakdownWithShare.reduce<BalanceSnapshot['balances']>((acc, item) => {
+        acc[item.symbol] = {
+          balanceWei: item.balanceWei,
+          balanceFormatted: item.balanceFormatted,
+        }
+        return acc
+      }, {}),
+    }
+
+    const diff = lastSnapshot
+      ? Object.entries(snapshot.balances).map(([symbol, current]) => {
+          const previous = lastSnapshot?.balances[symbol]
+          if (!previous) {
+            return { symbol, previous: null, current }
+          }
+
+          const delta = BigInt(current.balanceWei) - BigInt(previous.balanceWei)
+          return {
+            symbol,
+            previous,
+            current,
+            delta: delta.toString(),
+          }
+        })
+      : null
+
+    console.log('Computed treasury snapshot', {
+      walletAddress: checksummedWalletAddress,
+      blockNumber: snapshot.blockNumber,
+      totalUsd,
+      assets: breakdownWithShare.map((item) => ({
+        symbol: item.symbol,
+        balance: item.balance,
+        balanceWei: item.balanceWei,
+        usdValue: item.usdValue,
+      })),
+      diff,
+    })
+
+    lastSnapshot = snapshot
+
     return NextResponse.json(
       {
         ok: true,
@@ -177,12 +271,17 @@ export async function GET() {
         chainId: base.id,
         totalValueUsd: totalUsd,
         assets: breakdownWithShare,
+        blockNumber: typeof blockNumber === 'bigint' ? blockNumber.toString() : null,
+        blockHash,
         updatedAt: new Date().toISOString(),
       },
       {
         headers: {
-          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0, private',
           'Pragma': 'no-cache',
+          'Expires': '0',
+          'X-Block-Number': typeof blockNumber === 'bigint' ? blockNumber.toString() : '',
+          'X-Block-Hash': blockHash ?? '',
         },
       }
     )

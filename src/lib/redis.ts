@@ -66,6 +66,13 @@ export async function recordSuccessfulTransaction(
   const userTxSetKey = `user:tx:${tx.from.toLowerCase()}`
   const userStatsKey = `user:stats:${tx.from.toLowerCase()}`
 
+  const alreadyRecorded = await redis.exists(txKey)
+
+  if (alreadyRecorded) {
+    console.log('Skipping already recorded transaction', tx.hash)
+    return
+  }
+
   // Store transaction record (expires after 1 year)
   await redis.setex(txKey, 365 * 24 * 60 * 60, JSON.stringify(tx))
 
