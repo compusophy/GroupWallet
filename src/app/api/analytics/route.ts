@@ -3,6 +3,9 @@ import { formatEther } from 'viem'
 
 import { getAllUserStats } from '@/lib/redis'
 
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 const DEFAULT_ETH_PRICE_USD = 3000
 const BIGINT_ZERO = BigInt(0)
 const BIGINT_TEN_THOUSAND = BigInt(10000)

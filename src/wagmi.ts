@@ -1,6 +1,7 @@
 import { injected } from '@wagmi/core'
 import { cookieStorage, createConfig, createStorage, http } from 'wagmi'
 import { mainnet, sepolia, base } from 'wagmi/chains'
+import { farcasterMiniApp } from '@farcaster/miniapp-wagmi-connector'
 
 // Base RPC URL - use public Base RPC endpoint
 const baseRpcUrl = 'https://mainnet.base.org'
@@ -8,7 +9,7 @@ const baseRpcUrl = 'https://mainnet.base.org'
 export function getConfig() {
   return createConfig({
     chains: [mainnet, sepolia, base],
-    connectors: [injected()],
+    connectors: [farcasterMiniApp(), injected()],
     storage: createStorage({
       storage: cookieStorage,
     }),

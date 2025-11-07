@@ -8,6 +8,7 @@ import {
   useSendTransaction,
   useWaitForTransactionReceipt,
 } from 'wagmi'
+import { useSwitchChain } from 'wagmi'
 import { Wallet, LogOut, Copy, Check, Send, BarChart3, Vote, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -33,6 +34,7 @@ const VotingSection = lazy(() => import('@/components/voting-section').then(m =>
 
 // Import vault assets component directly for home page display
 import { VaultAssets } from '@/components/vault-assets'
+import { Skeleton } from '@/components/ui/skeleton'
 
 const FALLBACK_SEND_AMOUNT = '0.0001' as const
 type SendConfig = {
@@ -48,19 +50,36 @@ function formatAddress(address: string) {
   return `${address.slice(0, 8)}...${address.slice(-6)}`
 }
 
+function formatTokenAmount(value: number, maximumFractionDigits = 6) {
+  if (!Number.isFinite(value)) return '0'
+  if (value === 0) return '0'
+  if (value >= 1) {
+    return value.toLocaleString(undefined, { maximumFractionDigits })
+  }
+  return value.toPrecision(4).replace(/0+$/, '').replace(/\.$/, '')
+}
+
+
 function App() {
   const account = useAccount()
   const { connectors, connect, status: connectStatus, error: connectError } = useConnect()
   const { disconnect } = useDisconnect()
   const chainId = useChainId()
+  const { switchChainAsync } = useSwitchChain()
   
   const [vaultWalletAddress, setVaultWalletAddress] = useState<`0x${string}` | null>(null)
   const [vaultTotalUsd, setVaultTotalUsd] = useState(0)
+  const [vaultAssets, setVaultAssets] = useState<any[]>([])
   const [vaultCopied, setVaultCopied] = useState(false)
+  const [vaultLoading, setVaultLoading] = useState(true)
 
   const handleVaultSummaryUpdate = useCallback((summary: { totalUsd: number; walletAddress: `0x${string}` | null }) => {
     setVaultTotalUsd(summary.totalUsd)
     setVaultWalletAddress(summary.walletAddress)
+  }, [])
+
+  const handleVaultAssetsUpdate = useCallback((assets: any[]) => {
+    setVaultAssets(assets)
   }, [])
   
   function formatUsd(value: number) {
@@ -107,12 +126,43 @@ function App() {
 
   // Preload all components after initial page load
   useEffect(() => {
-    const timer = setTimeout(() => {
-      preloadAnalytics()
-      preloadVoting()
-    }, 2000) // Preload after 2 seconds
-    return () => clearTimeout(timer)
+    preloadAnalytics()
+    preloadVoting()
   }, [])
+
+  // Detect Mini App environment
+  const [isMiniApp, setIsMiniApp] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    import('@farcaster/miniapp-sdk')
+      .then(async ({ sdk }) => {
+        const inMini = await sdk.isInMiniApp().catch(() => false)
+        if (!cancelled) setIsMiniApp(Boolean(inMini))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Farcaster Mini App: show UI immediately (we'll handle intermediate states with skeletons)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const mod = await import('@farcaster/miniapp-sdk')
+        const s = (mod as any).default ?? (mod as any).sdk
+        if (!cancelled && s?.actions?.ready) {
+          await s.actions.ready()
+        }
+      } catch {}
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Remove auto switch on load; handle on click to avoid initial jitter
 
   useEffect(() => {
     let cancelled = false
@@ -232,28 +282,15 @@ function App() {
   const isRecipientReady = Boolean(treasuryAddress)
   const isAwaitingConfirmation = Boolean(isWaitingForReceipt && txHash)
 
-  const depositButtonDisabled = isConnected
-    ? !sendConfig ||
-      configLoading ||
-      !isOnBase ||
-      !isRecipientReady ||
-      isSending ||
-      isAwaitingConfirmation ||
-      serverStatus === 'pending'
-    : false
+  // Optimistic button: show as Deposit by default, only change for connect/switch or explicit progress states
+  const depositButtonDisabled =
+    isSending || isAwaitingConfirmation || serverStatus === 'pending'
 
   const depositButtonLabel = (() => {
-    if (!isConnected) return 'Connect wallet'
-    if (configLoading) return 'Preparing deposit...'
-    if (configError) return 'Retry deposit setup'
-    if (sendConfig && !isOnBase) return 'Switch to Base'
-    if (!isRecipientReady) return 'Vault unavailable'
     if (isSending) return 'Sending...'
     if (isAwaitingConfirmation) return 'Confirming...'
     if (serverStatus === 'pending') return 'Syncing...'
-    if (serverStatus === 'error' || txError || receiptError || sendError) return 'Retry deposit'
-    if (!sendConfig) return 'Deposit unavailable'
-    return `Deposit ${requiredAmountLabel} ETH`
+    return `Contribute ${requiredAmountLabel} ETH`
   })()
 
   const handleCopyAddress = () => {
@@ -275,8 +312,12 @@ function App() {
       return
     }
     if (!isOnBase) {
-      setTxError('Switch to the Base network to send a transaction')
-      return
+      try {
+        await switchChainAsync({ chainId: sendConfig.chainId as typeof base.id })
+      } catch (e) {
+        setTxError('Switch to the Base network to send a transaction')
+        return
+      }
     }
 
     setTxError(null)
@@ -303,47 +344,47 @@ function App() {
 
   return (
     <div className="min-h-screen relative">
-      <div className="fixed top-4 md:top-8 left-1/2 -translate-x-1/2 z-50 h-10 flex items-center">
-        <h1 className="text-2xl md:text-3xl font-bold tracking-tight">GroupWallet</h1>
+      {/* Header - same height as footer */}
+      <div className="fixed top-0 left-0 right-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-4 py-4">
+        <div className="mx-auto max-w-5xl flex justify-center">
+          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">GroupWallet</h1>
+        </div>
       </div>
 
-      
       {/* Main Content Area */}
-      <div className="pt-20 md:pt-28 px-4 md:px-8 pb-32">
+      <div className="pt-20 md:pt-24 px-4 md:px-8 pb-32">
         <div className="mx-auto max-w-5xl space-y-8">
           {/* Vault Assets - At the top */}
           <div className="max-w-2xl mx-auto space-y-4">
-            {/* Vault Total USD Value */}
-            <div className="text-center">
-              <p className="text-xl md:text-2xl font-semibold">{formatUsd(vaultTotalUsd)}</p>
-            </div>
-            
-            {/* Wallet Address */}
-            {vaultWalletAddress && (
-              <div className="flex items-center justify-center gap-2">
-                <code className="rounded bg-muted px-2 py-1 text-xs font-mono">
-                  {formatAddress(vaultWalletAddress)}
-                </code>
-                <button
-                  type="button"
-                  className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
-                  onClick={handleCopyVaultAddress}
-                  title="Copy wallet address"
-                >
-                  {vaultCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                </button>
-                <a
-                  href={`https://basescan.org/address/${vaultWalletAddress}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
-                  title="View on Basescan"
-                >
-                  <ExternalLink className="h-3 w-3" />
-                </a>
+            {/* Vault Summary Container */}
+            <div className="bg-card rounded-lg border p-6 space-y-4">
+              {/* Total USD Value - Centered */}
+              <div className="text-center">
+                {vaultLoading ? (
+                  <Skeleton className="h-8 w-24 mx-auto" />
+                ) : (
+                  <span className="text-3xl font-semibold">{formatUsd(vaultTotalUsd)}</span>
+                )}
               </div>
-            )}
-            <VaultAssets onSummaryUpdate={handleVaultSummaryUpdate} />
+
+              {/* Asset Breakdown */}
+              {!vaultLoading && vaultAssets.length > 0 && (
+                <div className="space-y-2">
+                  {vaultAssets.map((asset) => (
+                    <div key={`summary-${asset.id}`} className="flex justify-between items-center">
+                      <span className="text-sm font-medium">{formatTokenAmount(asset.balance)} {asset.symbol}</span>
+                      <span className="text-sm text-muted-foreground">{formatUsd(asset.usdValue)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <VaultAssets
+              onSummaryUpdate={handleVaultSummaryUpdate}
+              onLoadingChange={setVaultLoading}
+              onAssetsUpdate={handleVaultAssetsUpdate}
+            />
           </div>
           
           {/* Button Array - Centered below assets */}
@@ -387,7 +428,19 @@ function App() {
                   setAccountDialogOpen(true)
                   return
                 }
-
+                // If not on Base yet, attempt switch optimistically, then proceed
+                if (sendConfig && !isOnBase) {
+                  void (async () => {
+                    try {
+                      await switchChainAsync({ chainId: sendConfig.chainId as typeof base.id })
+                      await handleSendTransaction()
+                    } catch {
+                      // fall back to normal handler which will set message if needed
+                      void handleSendTransaction()
+                    }
+                  })()
+                  return
+                }
                 void handleSendTransaction()
               }}
             >
@@ -406,8 +459,41 @@ function App() {
               Platform Analytics
             </DialogTitle>
             <DialogDescription>Overview of deposits and contributor share.</DialogDescription>
+            {vaultWalletAddress && (
+              <div className="flex items-center gap-2 pt-2">
+                <span className="text-sm text-muted-foreground">Vault address:</span>
+                <code className="rounded bg-muted px-2 py-1 text-xs font-mono">
+                  {formatAddress(vaultWalletAddress)}
+                </code>
+                <button
+                  type="button"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
+                  onClick={handleCopyVaultAddress}
+                  title="Copy wallet address"
+                >
+                  {vaultCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                </button>
+                <a
+                  href={`https://basescan.org/address/${vaultWalletAddress}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
+                  title="View on Basescan"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+            )}
           </DialogHeader>
-          <Suspense fallback={<p className="text-sm text-muted-foreground">Loading analytics...</p>}>
+          <Suspense
+            fallback={
+              <div className="space-y-3">
+                <Skeleton className="h-5 w-40" />
+                <Skeleton className="h-24 w-full" />
+                <Skeleton className="h-24 w-full" />
+              </div>
+            }
+          >
             <PlatformAnalytics />
           </Suspense>
         </DialogContent>
@@ -421,7 +507,15 @@ function App() {
             </DialogTitle>
             <DialogDescription>Eligible depositors can vote once and update their choice at any time.</DialogDescription>
           </DialogHeader>
-          <Suspense fallback={<p className="text-sm text-muted-foreground">Loading voting...</p>}>
+          <Suspense
+            fallback={
+              <div className="space-y-3">
+                <Skeleton className="h-5 w-40" />
+                <Skeleton className="h-24 w-full" />
+                <Skeleton className="h-24 w-full" />
+              </div>
+            }
+          >
             <VotingSection />
           </Suspense>
         </DialogContent>

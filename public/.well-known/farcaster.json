@@ -1,0 +1,20 @@
+{
+  "miniapp": {
+    "version": "1",
+    "name": "GroupWallet",
+    "iconUrl": "https://compu-custom-hooks.vercel.app/icon.png",
+    "homeUrl": "https://compu-custom-hooks.vercel.app/",
+    "imageUrl": "https://compu-custom-hooks.vercel.app/image.png",
+    "buttonTitle": "Open App",
+    "splashImageUrl": "https://placehold.co/200x200.png",
+    "splashBackgroundColor": "#ffffff",
+    "requiredChains": [
+      "eip155:8453"
+    ],
+    "requiredCapabilities": [
+      "wallet.getEthereumProvider",
+      "actions.ready"
+    ]
+  }
+}
+
