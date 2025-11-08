@@ -8,8 +8,9 @@ import {
   useSendTransaction,
   useWaitForTransactionReceipt,
 } from 'wagmi'
-import { useSwitchChain } from 'wagmi'
-import { Wallet, LogOut, Copy, Check, Send, BarChart3, Vote, ExternalLink } from 'lucide-react'
+import { useSwitchChain, useSignMessage } from 'wagmi'
+import { formatEther } from 'viem'
+import { Wallet, LogOut, Copy, Check, BarChart3, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -30,11 +31,11 @@ import { base } from 'wagmi/chains'
 
 // Lazy load dialog components for better initial load performance
 const PlatformAnalytics = lazy(() => import('@/components/platform-analytics').then(m => ({ default: m.PlatformAnalytics })))
-const VotingSection = lazy(() => import('@/components/voting-section').then(m => ({ default: m.VotingSection })))
 
 // Import vault assets component directly for home page display
 import { VaultAssets } from '@/components/vault-assets'
 import { Skeleton } from '@/components/ui/skeleton'
+import { createAllocationVoteMessage, VOTE_PROPOSAL_ID } from '@/lib/voting'
 
 const FALLBACK_SEND_AMOUNT = '0.0001' as const
 type SendConfig = {
@@ -44,6 +45,12 @@ type SendConfig = {
   confirmations: number
   targetRecipient: `0x${string}` | null
   allowCustomRecipient: boolean
+}
+
+type ConsensusTotals = {
+  weightedEthPercent: number
+  totalWeight: number
+  totalVoters: number
 }
 
 function formatAddress(address: string) {
@@ -59,6 +66,41 @@ function formatTokenAmount(value: number, maximumFractionDigits = 6) {
   return value.toPrecision(4).replace(/0+$/, '').replace(/\.$/, '')
 }
 
+function formatUsd(value: number) {
+  if (!Number.isFinite(value)) return '$0.00'
+  return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+}
+
+function normalizeConsensusTotals(input: any): ConsensusTotals {
+  const toNumber = (value: unknown, fallback = 0) => {
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : fallback
+    }
+    if (typeof value === 'string') {
+      const parsed = Number.parseFloat(value)
+      return Number.isFinite(parsed) ? parsed : fallback
+    }
+    return fallback
+  }
+
+  const weightedEthPercent = Math.max(0, Math.min(100, toNumber(input?.weightedEthPercent)))
+  const totalWeight = Math.max(0, Math.min(1, toNumber(input?.totalWeight)))
+  const totalVoters = Math.max(0, Math.round(toNumber(input?.totalVoters)))
+
+  return {
+    weightedEthPercent,
+    totalWeight,
+    totalVoters,
+  }
+}
+
+function createClaimMessage(address: `0x${string}`, timestamp: number) {
+    return [
+      'wagmi-claim',
+      `address:${address.toLowerCase()}`,
+      `timestamp:${timestamp}`,
+    ].join('\n')
+  }
 
 function App() {
   const account = useAccount()
@@ -70,8 +112,42 @@ function App() {
   const [vaultWalletAddress, setVaultWalletAddress] = useState<`0x${string}` | null>(null)
   const [vaultTotalUsd, setVaultTotalUsd] = useState(0)
   const [vaultAssets, setVaultAssets] = useState<any[]>([])
+  const [userStats, setUserStats] = useState<{ totalValueEth: string; percentage: number }>({ totalValueEth: '0', percentage: 0 })
   const [vaultCopied, setVaultCopied] = useState(false)
   const [vaultLoading, setVaultLoading] = useState(true)
+  const [selectedEthPercent, setSelectedEthPercent] = useState<number>(50)
+  const [hasAdjustedSlider, setHasAdjustedSlider] = useState(false)
+  const [initialSliderSynced, setInitialSliderSynced] = useState(false)
+  const [consensusTotals, setConsensusTotals] = useState<ConsensusTotals | null>(null)
+  const [submittingAllocation, setSubmittingAllocation] = useState(false)
+  const [votePhase, setVotePhase] = useState<'idle' | 'signing' | 'posting'>('idle')
+  const fireConfetti = useCallback(async () => {
+    try {
+      const mod = (await import('canvas-confetti')).default as unknown as (
+        opts?: any
+      ) => void
+      const shoot = (particleRatio: number, opts: any) => {
+        mod({
+          spread: 60,
+          startVelocity: 45,
+          decay: 0.9,
+          gravity: 1.1,
+          scalar: 0.9,
+          ticks: 200,
+          zIndex: 9999,
+          ...opts,
+          particleCount: Math.floor(200 * particleRatio),
+        })
+      }
+      shoot(0.25, { origin: { y: 0.7 } })
+      shoot(0.2, { spread: 100, origin: { y: 0.6 } })
+      shoot(0.35, { spread: 120, startVelocity: 55, origin: { y: 0.5 } })
+      shoot(0.1, { spread: 130, origin: { y: 0.7 } })
+      shoot(0.1, { spread: 130, origin: { y: 0.7 } })
+    } catch {
+      // no-op if library not available
+    }
+  }, [])
 
   const handleVaultSummaryUpdate = useCallback((summary: { totalUsd: number; walletAddress: `0x${string}` | null }) => {
     setVaultTotalUsd(summary.totalUsd)
@@ -81,12 +157,96 @@ function App() {
   const handleVaultAssetsUpdate = useCallback((assets: any[]) => {
     setVaultAssets(assets)
   }, [])
-  
-  function formatUsd(value: number) {
-    if (!Number.isFinite(value)) return '$0.00'
-    return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
-  }
 
+  useEffect(() => {
+    if (hasAdjustedSlider || initialSliderSynced) return
+    const totals = consensusTotals
+    if (totals && totals.totalWeight > 0) {
+      const pct = Math.max(0, Math.min(100, Math.round(totals.weightedEthPercent)))
+      setSelectedEthPercent(pct)
+      setInitialSliderSynced(true)
+    }
+  }, [consensusTotals, hasAdjustedSlider, initialSliderSynced])
+
+  useEffect(() => {
+    if (hasAdjustedSlider || initialSliderSynced) return
+    const eth = vaultAssets.find((a: any) => (a?.symbol || '').toUpperCase() === 'ETH')
+    if (eth && Number.isFinite(eth.share)) {
+      const pct = Math.max(0, Math.min(100, Math.round(eth.share * 100)))
+      if (Math.abs(selectedEthPercent - pct) > 0.05) {
+        setSelectedEthPercent(pct)
+      }
+    }
+  }, [vaultAssets, hasAdjustedSlider, initialSliderSynced, selectedEthPercent])
+
+  const fetchUserStats = useCallback(async () => {
+    if (!account?.addresses?.[0]) {
+      setUserStats({ totalValueEth: '0', percentage: 0 })
+      return
+    }
+
+    try {
+      const voteResponse = await fetch(`/api/vote?address=${account.addresses[0]}`, { cache: 'no-store' })
+      const analyticsResponse = await fetch('/api/analytics', { cache: 'no-store' })
+
+      if (!voteResponse.ok || !analyticsResponse.ok) {
+        return
+      }
+
+      const voteData = await voteResponse.json()
+      const analyticsData = await analyticsResponse.json()
+
+      if (voteData.ok && analyticsData.ok) {
+        const userVote = voteData.userVote
+        const eligibility = voteData.eligibility
+
+        let userDepositEth = '0'
+        if (userVote?.depositValueEth) {
+          userDepositEth = userVote.depositValueEth
+        } else if (eligibility?.isEligible) {
+          userDepositEth = eligibility.depositValueEth
+        }
+
+        const userDeposits = parseFloat(userDepositEth)
+        const totalDeposits = parseFloat(analyticsData.totalDeposits?.eth || '0')
+        const percentage = totalDeposits > 0 ? (userDeposits / totalDeposits) * 100 : 0
+
+        setUserStats({ totalValueEth: userDepositEth, percentage })
+      } else {
+        setUserStats({ totalValueEth: '0', percentage: 0 })
+      }
+    } catch (error) {
+      console.error('Failed to fetch user stats:', error)
+      setUserStats({ totalValueEth: '0', percentage: 0 })
+    }
+  }, [account?.addresses])
+
+  // Load user's saved allocation vote (if any) and prefill slider
+  useEffect(() => {
+    let cancelled = false
+    const loadUserVote = async () => {
+      const addr = account?.addresses?.[0]
+      if (!addr) return
+      try {
+        const res = await fetch(`/api/vote?address=${addr}`, { cache: 'no-store' })
+        if (!res.ok) return
+        const json = await res.json()
+        const pct = json?.userVote?.ethPercent
+        if (!cancelled && !hasAdjustedSlider && Number.isFinite(pct)) {
+          setSelectedEthPercent(Math.max(0, Math.min(100, Math.round(Number(pct)))))
+          setInitialSliderSynced(true)
+        }
+        if (!cancelled && json?.totals) {
+          setConsensusTotals(normalizeConsensusTotals(json.totals))
+        }
+      } catch {}
+    }
+    void loadUserVote()
+    return () => {
+      cancelled = true
+    }
+  }, [account?.addresses, hasAdjustedSlider, initialSliderSynced])
+  
   const handleCopyVaultAddress = useCallback(() => {
     if (!vaultWalletAddress) return
     navigator.clipboard
@@ -114,20 +274,16 @@ function App() {
   const [hasServerSynced, setHasServerSynced] = useState(false)
   const [accountDialogOpen, setAccountDialogOpen] = useState(false)
   const [analyticsDialogOpen, setAnalyticsDialogOpen] = useState(false)
-  const [votingDialogOpen, setVotingDialogOpen] = useState(false)
+  const [claiming, setClaiming] = useState(false)
+  const [claimResult, setClaimResult] = useState<null | { mode: 'quote' | 'executed'; share: number; plan: Array<{ symbol: string; amountFormatted: string }>; transactions?: Array<{ symbol: string; hash: string }> }>(null)
 
   // Preload components on hover for faster dialog opening
   const preloadAnalytics = () => {
     import('@/components/platform-analytics')
   }
-  const preloadVoting = () => {
-    import('@/components/voting-section')
-  }
-
-  // Preload all components after initial page load
+  // Preload components after initial page load
   useEffect(() => {
     preloadAnalytics()
-    preloadVoting()
   }, [])
 
   // Detect Mini App environment
@@ -252,6 +408,7 @@ function App() {
 
         if (!cancelled) {
           setServerStatus('success')
+          void fireConfetti()
           // Dispatch event to notify voting section to refresh
           window.dispatchEvent(new Event('deposit-confirmed'))
         }
@@ -273,11 +430,19 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [txHash, transactionReceipt, isReceiptSuccess, hasServerSynced])
+  }, [txHash, transactionReceipt, isReceiptSuccess, hasServerSynced, fireConfetti])
 
   const requiredAmountLabel = sendConfig?.valueEth ?? FALLBACK_SEND_AMOUNT
 
   const isConnected = account.status === 'connected'
+
+  // Fetch user stats when connected
+  useEffect(() => {
+    if (isConnected && vaultTotalUsd > 0) {
+      fetchUserStats()
+    }
+  }, [isConnected, vaultTotalUsd, fetchUserStats])
+
   const isOnBase = sendConfig ? targetChainId === sendConfig.chainId : false
   const isRecipientReady = Boolean(treasuryAddress)
   const isAwaitingConfirmation = Boolean(isWaitingForReceipt && txHash)
@@ -290,8 +455,18 @@ function App() {
     if (isSending) return 'Sending...'
     if (isAwaitingConfirmation) return 'Confirming...'
     if (serverStatus === 'pending') return 'Syncing...'
-    return `Contribute ${requiredAmountLabel} ETH`
+    return 'Contribute'
   })()
+
+  const shareMultiplier = userStats.percentage / 100
+  const shareTotalUsd = vaultAssets.reduce((acc, asset) => acc + asset.usdValue * shareMultiplier, 0)
+
+  const hasConsensusPlan = Boolean(consensusTotals && consensusTotals.totalWeight > 0)
+  const consensusEthPercent = hasConsensusPlan
+    ? Math.max(0, Math.min(100, Math.round(consensusTotals!.weightedEthPercent)))
+    : null
+  const consensusEthFraction = consensusEthPercent !== null ? consensusEthPercent / 100 : null
+  const consensusUsdcFraction = consensusEthFraction !== null ? Math.max(0, Math.min(1, 1 - consensusEthFraction)) : null
 
   const handleCopyAddress = () => {
     const address = account.addresses?.[0]
@@ -299,6 +474,36 @@ function App() {
     navigator.clipboard.writeText(address)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
+  }
+
+  const { signMessageAsync } = useSignMessage()
+
+  const handleClaimShare = async () => {
+    if (!account?.addresses?.[0]) return
+    const addr = account.addresses[0] as `0x${string}`
+    const timestamp = Date.now()
+    const message = createClaimMessage(addr, timestamp)
+    setClaimResult(null)
+    setClaiming(true)
+    try {
+      const signature = await signMessageAsync({ message })
+      const res = await fetch('/api/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address: addr, signature, timestamp }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || 'Claim failed')
+      }
+      const plan = (json.plan as Array<{ symbol: string; amountFormatted: string }> | undefined) ?? []
+      setClaimResult({ mode: json.mode, share: json.share, plan, transactions: json.transactions })
+    } catch (e) {
+      console.error('Claim failed', e)
+      setClaimResult({ mode: 'quote', share: 0, plan: [] })
+    } finally {
+      setClaiming(false)
+    }
   }
 
   const handleSendTransaction = async () => {
@@ -344,22 +549,12 @@ function App() {
 
   return (
     <div className="min-h-screen relative">
-      {/* Header - same height as footer */}
-      <div className="fixed top-0 left-0 right-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-4 py-4">
-        <div className="mx-auto max-w-5xl flex justify-center">
-          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">GroupWallet</h1>
-        </div>
-      </div>
-
-      {/* Main Content Area */}
-      <div className="pt-20 md:pt-24 px-4 md:px-8 pb-32">
-        <div className="mx-auto max-w-5xl space-y-8">
-          {/* Vault Assets - At the top */}
-          <div className="max-w-2xl mx-auto space-y-4">
-            {/* Vault Summary Container */}
-            <div className="bg-card rounded-lg border p-6 space-y-4">
-              {/* Total USD Value - Centered */}
-              <div className="text-center">
+      <div className="pt-4 md:pt-6 px-4 md:px-6 pb-4">
+          <div className="mx-auto max-w-5xl space-y-6">
+            <div className="max-w-2xl mx-auto relative h-[calc(100dvh-32px)] md:h-[calc(100dvh-40px)]">
+            <div className="absolute inset-x-0 top-0">
+              <div className="bg-card rounded-lg border p-4 space-y-4">
+              <div className="mt-1 text-center">
                 {vaultLoading ? (
                   <Skeleton className="h-8 w-24 mx-auto" />
                 ) : (
@@ -367,248 +562,374 @@ function App() {
                 )}
               </div>
 
-              {/* Asset Breakdown */}
               {!vaultLoading && vaultAssets.length > 0 && (
-                <div className="space-y-2">
+                <div className="space-y-4">
                   {vaultAssets.map((asset) => (
                     <div key={`summary-${asset.id}`} className="flex justify-between items-center">
-                      <span className="text-sm font-medium">{formatTokenAmount(asset.balance)} {asset.symbol}</span>
+                      <span className="text-sm font-medium">
+                        {formatTokenAmount(asset.balance)} {asset.symbol}
+                      </span>
                       <span className="text-sm text-muted-foreground">{formatUsd(asset.usdValue)}</span>
                     </div>
                   ))}
                 </div>
               )}
-            </div>
 
-            <VaultAssets
-              onSummaryUpdate={handleVaultSummaryUpdate}
-              onLoadingChange={setVaultLoading}
-              onAssetsUpdate={handleVaultAssetsUpdate}
-            />
-          </div>
-          
-          {/* Button Array - Centered below assets */}
-          <div className="flex justify-center">
-            <div className="w-2/3 flex flex-col gap-1">
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full justify-start gap-3 h-auto py-3 px-4"
-            onClick={() => setAnalyticsDialogOpen(true)}
-            onMouseEnter={preloadAnalytics}
-          >
-            <BarChart3 className="h-5 w-5 flex-shrink-0" />
-            <span className="text-sm font-medium">Platform Analytics</span>
-          </Button>
-          
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full justify-start gap-3 h-auto py-3 px-4"
-            onClick={() => setVotingDialogOpen(true)}
-            onMouseEnter={preloadVoting}
-          >
-            <Vote className="h-5 w-5 flex-shrink-0" />
-            <span className="text-sm font-medium">Allocation Vote</span>
-          </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-4 py-4">
-        <div className="mx-auto max-w-5xl flex justify-center">
-          <div className="w-full md:w-2/3">
-            <Button
-              type="button"
-              className="w-full flex items-center justify-center gap-2"
-              disabled={depositButtonDisabled}
-              onClick={() => {
-                if (!isConnected) {
-                  setAccountDialogOpen(true)
-                  return
-                }
-                // If not on Base yet, attempt switch optimistically, then proceed
-                if (sendConfig && !isOnBase) {
-                  void (async () => {
-                    try {
-                      await switchChainAsync({ chainId: sendConfig.chainId as typeof base.id })
-                      await handleSendTransaction()
-                    } catch {
-                      // fall back to normal handler which will set message if needed
-                      void handleSendTransaction()
-                    }
-                  })()
-                  return
-                }
-                void handleSendTransaction()
-              }}
-            >
-              <Send className="h-5 w-5" />
-              <span>{depositButtonLabel}</span>
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      <Dialog open={analyticsDialogOpen} onOpenChange={setAnalyticsDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <BarChart3 className="h-5 w-5" />
-              Platform Analytics
-            </DialogTitle>
-            <DialogDescription>Overview of deposits and contributor share.</DialogDescription>
-            {vaultWalletAddress && (
-              <div className="flex items-center gap-2 pt-2">
-                <span className="text-sm text-muted-foreground">Vault address:</span>
-                <code className="rounded bg-muted px-2 py-1 text-xs font-mono">
-                  {formatAddress(vaultWalletAddress)}
-                </code>
-                <button
-                  type="button"
-                  className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
-                  onClick={handleCopyVaultAddress}
-                  title="Copy wallet address"
-                >
-                  {vaultCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                </button>
-                <a
-                  href={`https://basescan.org/address/${vaultWalletAddress}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
-                  title="View on Basescan"
-                >
-                  <ExternalLink className="h-3 w-3" />
-                </a>
-              </div>
-            )}
-          </DialogHeader>
-          <Suspense
-            fallback={
-              <div className="space-y-3">
-                <Skeleton className="h-5 w-40" />
-                <Skeleton className="h-24 w-full" />
-                <Skeleton className="h-24 w-full" />
-              </div>
-            }
-          >
-            <PlatformAnalytics />
-          </Suspense>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={votingDialogOpen} onOpenChange={setVotingDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Vote className="h-5 w-5" />
-              Allocation Vote
-            </DialogTitle>
-            <DialogDescription>Eligible depositors can vote once and update their choice at any time.</DialogDescription>
-          </DialogHeader>
-          <Suspense
-            fallback={
-              <div className="space-y-3">
-                <Skeleton className="h-5 w-40" />
-                <Skeleton className="h-24 w-full" />
-                <Skeleton className="h-24 w-full" />
-              </div>
-            }
-          >
-            <VotingSection />
-          </Suspense>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={accountDialogOpen} onOpenChange={setAccountDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Wallet className="h-5 w-5" />
-              {account.status === 'connected' ? 'Account' : 'Connect Wallet'}
-            </DialogTitle>
-            <DialogDescription>
-              {account.status === 'connected'
-                ? 'Your connected wallet information'
-                : 'Select a wallet to get started.'}
-            </DialogDescription>
-          </DialogHeader>
-          {account.status === 'connected' ? (
-            <div className="space-y-4">
-              <div className="space-y-3">
-                <div className="flex items-center justify-between py-2">
-                  <span className="text-sm font-medium text-muted-foreground">Status</span>
-                  <span className="rounded-full bg-green-500/10 px-2 py-1 text-xs font-semibold text-green-500">
-                    Connected
-                  </span>
-                </div>
-                <div className="flex items-center justify-between py-2">
-                  <span className="text-sm font-medium text-muted-foreground">Address</span>
-                  <div className="flex items-center gap-2">
-                    <code className="rounded bg-muted px-2 py-1 text-sm">
-                      {account.addresses?.[0] ? formatAddress(account.addresses[0]) : 'N/A'}
-                    </code>
-                    <Button
-                      aria-label="Copy address"
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
-                      onClick={handleCopyAddress}
-                    >
-                      {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                    </Button>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between py-2">
-                  <span className="text-sm font-medium text-muted-foreground">Chain ID</span>
-                  <span className="font-mono text-sm">{account.chainId}</span>
-                </div>
-              </div>
               <Button
-                variant="destructive"
+                type="button"
                 className="w-full"
+                disabled={depositButtonDisabled}
                 onClick={() => {
-                  disconnect()
-                  setAccountDialogOpen(false)
+                  if (!isConnected) {
+                    setAccountDialogOpen(true)
+                    return
+                  }
+                  if (sendConfig && !isOnBase) {
+                    void (async () => {
+                      try {
+                        await switchChainAsync({ chainId: sendConfig.chainId as typeof base.id })
+                        await handleSendTransaction()
+                      } catch {
+                        void handleSendTransaction()
+                      }
+                    })()
+                    return
+                  }
+                  void handleSendTransaction()
                 }}
               >
-                <LogOut className="mr-2 h-4 w-4" />
-                Disconnect
+                <span>{depositButtonLabel}</span>
               </Button>
+              </div>
             </div>
-          ) : (
-            <div className="space-y-4">
-              {connectors.map((connector) => (
-                <Button
-                  key={connector.uid}
-                  onClick={() => {
-                    connect({ connector })
-                    setAccountDialogOpen(false)
+
+            <div className="absolute inset-x-0 top-1/2 -translate-y-1/2">
+              <div className="bg-card rounded-lg border p-4 space-y-4">
+              <div className="mt-1">
+                <VaultAssets
+                  onSummaryUpdate={handleVaultSummaryUpdate}
+                  onLoadingChange={setVaultLoading}
+                  onAssetsUpdate={handleVaultAssetsUpdate}
+                  onConsensusUpdate={setConsensusTotals}
+                />
+              </div>
+
+              {/* Slider to pick ETH/USDC ratio */}
+              <div className="mt-1 text-center text-sm text-muted-foreground">
+                {`ETH ${Math.round(selectedEthPercent)}% · USDC ${Math.round(100 - selectedEthPercent)}%`}
+              </div>
+              <div className="mt-1 px-1">
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  value={selectedEthPercent}
+                  onChange={(e) => {
+                    setHasAdjustedSlider(true)
+                    setSelectedEthPercent(Number(e.target.value))
                   }}
-                  className="w-full justify-start"
-                  variant="outline"
-                  disabled={connectStatus === 'pending'}
-                >
-                  <Wallet className="mr-2 h-4 w-4" />
-                  {connector.name}
-                </Button>
-              ))}
-              {connectStatus === 'pending' && (
-                <p className="py-2 text-center text-sm text-muted-foreground">Connecting...</p>
-              )}
-              {connectError && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {connectError.message}
+                  className="w-full"
+                />
+              </div>
+
+              <Button
+                type="button"
+                className="w-full"
+                disabled={vaultLoading || vaultAssets.length === 0 || submittingAllocation || votePhase !== 'idle'}
+                onClick={async () => {
+                  if (!isConnected) {
+                    setAccountDialogOpen(true)
+                    return
+                  }
+                  const addr = account.addresses?.[0]
+                  if (!addr) return
+                  setSubmittingAllocation(true)
+                  try {
+                    setVotePhase('signing')
+                    const timestamp = Date.now()
+                    const message = createAllocationVoteMessage({
+                      proposalId: VOTE_PROPOSAL_ID,
+                      address: addr as `0x${string}`,
+                      ethPercent: Math.round(selectedEthPercent),
+                      timestamp,
+                    })
+                    const signature = await signMessageAsync({ message })
+                    setVotePhase('posting')
+                    const res = await fetch('/api/vote', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ address: addr, ethPercent: Math.round(selectedEthPercent), signature, timestamp }),
+                    })
+                    let json: any = null
+                    try {
+                      json = await res.json()
+                    } catch (parseErr) {
+                      console.error('Failed to parse allocation vote response', parseErr)
+                    }
+
+                    if (res.ok && json?.ok) {
+                      if (json?.totals) {
+                        setConsensusTotals(normalizeConsensusTotals(json.totals))
+                      }
+                      window.dispatchEvent(new Event('allocation-vote-updated'))
+                      void fireConfetti()
+                    } else {
+                      const message = json?.error || 'Allocation vote submission failed'
+                      console.error(message)
+                    }
+                  } catch (e) {
+                    console.error('Allocation vote failed', e)
+                  } finally {
+                    setSubmittingAllocation(false)
+                    setVotePhase('idle')
+                  }
+                }}
+              >
+                {votePhase === 'signing'
+                  ? 'Confirming...'
+                  : votePhase === 'posting'
+                    ? 'Syncing...'
+                    : isConnected
+                      ? 'Vote'
+                      : 'Connect to vote'}
+              </Button>
+
+              </div>
+            </div>
+
+            {isConnected && (
+              <>
+                <div className="absolute inset-x-0 bottom-0">
+                  <div className="bg-card rounded-lg border p-4 space-y-4">
+                  <div className="mt-1 text-center">
+                    {vaultLoading ? (
+                      <Skeleton className="h-8 w-24 mx-auto" />
+                    ) : (
+                      <span className="text-3xl font-semibold">{formatUsd(shareTotalUsd)}</span>
+                    )}
+                  </div>
+                  <div className="space-y-4">
+                    {vaultLoading ? (
+                      <div className="space-y-2">
+                        <Skeleton className="h-5 w-32 mx-auto" />
+                        <Skeleton className="h-5 w-40 mx-auto" />
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {vaultAssets.length > 0 ? (
+                          vaultAssets.map((asset) => {
+                            const upperSymbol = (asset.symbol || '').toUpperCase()
+                            const pricePerTokenUsd = asset.balance > 0 ? asset.usdValue / asset.balance : 0
+
+                            let claimTokenAmount = asset.balance * shareMultiplier
+                            let claimUsdAmount = asset.usdValue * shareMultiplier
+
+                            if (hasConsensusPlan && shareTotalUsd > 0 && consensusEthFraction !== null && consensusUsdcFraction !== null) {
+                              let consensusFraction: number | null = null
+                              if (upperSymbol === 'ETH' || upperSymbol === 'WETH') {
+                                consensusFraction = consensusEthFraction
+                              } else if (upperSymbol === 'USDC' || upperSymbol === 'USDBC') {
+                                consensusFraction = consensusUsdcFraction
+                              }
+
+                              if (consensusFraction !== null) {
+                                const targetUsd = shareTotalUsd * consensusFraction
+                                claimUsdAmount = targetUsd
+                                claimTokenAmount = pricePerTokenUsd > 0 ? targetUsd / pricePerTokenUsd : 0
+                              }
+                            }
+
+                            return (
+                              <div key={`share-${asset.id}`} className="flex justify-between items-center">
+                                <span className="text-sm font-medium">
+                                  {formatTokenAmount(claimTokenAmount)} {asset.symbol}
+                                </span>
+                                <span className="text-sm text-muted-foreground">{formatUsd(claimUsdAmount)}</span>
+                              </div>
+                            )
+                          })
+                        ) : (
+                          <div className="text-sm text-muted-foreground text-center">No assets available yet</div>
+                        )}
+                      </div>
+                    )}
+
+                    <Button
+                      type="button"
+                      className="w-full"
+                      disabled={claiming || vaultLoading || vaultAssets.length === 0}
+                      onClick={handleClaimShare}
+                    >
+                    {claiming ? 'Processing…' : 'Settle'}
+                    </Button>
+
+                    {claimResult && !vaultLoading && (
+                      <div className="space-y-1 text-center text-xs text-muted-foreground">
+                        <div>
+                          {claimResult.mode === 'executed' ? 'Settlement executed' : 'Settlement preview'} — share:{' '}
+                          {(claimResult.share * 100).toFixed(2)}%
+                        </div>
+                        {claimResult.plan.length > 0 && (
+                          <div className="space-y-1">
+                            {claimResult.plan.map((p, i) => (
+                              <div key={`claim-${p.symbol}-${i}`} className="flex justify-between">
+                                <span>{p.symbol}</span>
+                                <span>{p.amountFormatted}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  </div>
+                </div>
+
+                {/* Allocation voting UI replaces previous yes/no card */}
+              </>
+            )}
+
+            {/* Voting section removed per new allocation voting design */}
+          </div>
+
+          <Dialog open={analyticsDialogOpen} onOpenChange={setAnalyticsDialogOpen}>
+            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <BarChart3 className="h-5 w-5" />
+                  Platform Analytics
+                </DialogTitle>
+                <DialogDescription>Overview of deposits and contributor share.</DialogDescription>
+                {vaultWalletAddress && (
+                  <div className="flex items-center gap-2 pt-2">
+                    <span className="text-sm text-muted-foreground">Vault address:</span>
+                    <code className="rounded bg-muted px-2 py-1 text-xs font-mono">
+                      {formatAddress(vaultWalletAddress)}
+                    </code>
+                    <button
+                      type="button"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
+                      onClick={handleCopyVaultAddress}
+                      title="Copy wallet address"
+                    >
+                      {vaultCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    </button>
+                    <a
+                      href={`https://basescan.org/address/${vaultWalletAddress}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted flex-shrink-0"
+                      title="View on Basescan"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                )}
+              </DialogHeader>
+              <Suspense
+                fallback={
+                  <div className="space-y-3">
+                    <Skeleton className="h-5 w-40" />
+                    <Skeleton className="h-24 w-full" />
+                    <Skeleton className="h-24 w-full" />
+                  </div>
+                }
+              >
+                <PlatformAnalytics />
+              </Suspense>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={accountDialogOpen} onOpenChange={setAccountDialogOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Wallet className="h-5 w-5" />
+                  {account.status === 'connected' ? 'Account' : 'Connect Wallet'}
+                </DialogTitle>
+                <DialogDescription>
+                  {account.status === 'connected'
+                    ? 'Your connected wallet information'
+                    : 'Select a wallet to get started.'}
+                </DialogDescription>
+              </DialogHeader>
+              {account.status === 'connected' ? (
+                <div className="space-y-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between py-2">
+                      <span className="text-sm font-medium text-muted-foreground">Status</span>
+                      <span className="rounded-full bg-green-500/10 px-2 py-1 text-xs font-semibold text-green-500">
+                        Connected
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between py-2">
+                      <span className="text-sm font-medium text-muted-foreground">Address</span>
+                      <div className="flex items-center gap-2">
+                        <code className="rounded bg-muted px-2 py-1 text-sm">
+                          {account.addresses?.[0] ? formatAddress(account.addresses[0]) : 'N/A'}
+                        </code>
+                        <Button
+                          aria-label="Copy address"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={handleCopyAddress}
+                        >
+                          {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between py-2">
+                      <span className="text-sm font-medium text-muted-foreground">Chain ID</span>
+                      <span className="font-mono text-sm">{account.chainId}</span>
+                    </div>
+                  </div>
+                  <Button
+                    variant="destructive"
+                    className="w-full"
+                    onClick={() => {
+                      disconnect()
+                      setAccountDialogOpen(false)
+                    }}
+                  >
+                    <LogOut className="mr-2 h-4 w-4" />
+                    Disconnect
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {connectors.map((connector) => (
+                    <Button
+                      key={connector.uid}
+                      onClick={() => {
+                        connect({ connector })
+                        setAccountDialogOpen(false)
+                      }}
+                      className="w-full justify-start"
+                      variant="outline"
+                      disabled={connectStatus === 'pending'}
+                    >
+                      <Wallet className="mr-2 h-4 w-4" />
+                      {connector.name}
+                    </Button>
+                  ))}
+                  {connectStatus === 'pending' && (
+                    <p className="py-2 text-center text-sm text-muted-foreground">Connecting...</p>
+                  )}
+                  {connectError && (
+                    <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                      {connectError.message}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
     </div>
-  )
+  );
 }
 
 export default App

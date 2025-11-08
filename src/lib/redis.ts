@@ -430,3 +430,207 @@ export async function getVoteResults(proposalId: string): Promise<{
   return { totals: normalizedTotals, votes: updatedVotes }
 }
 
+export async function resetLegacyVoteData(proposalId: string): Promise<void> {
+  const recordsKey = getVoteRecordsKey(proposalId)
+  const totalsKey = getVoteTotalsKey(proposalId)
+  try {
+    await redis.del(recordsKey, totalsKey)
+  } catch (error) {
+    console.error('Failed to reset legacy vote data:', error)
+    throw error
+  }
+}
+
+// Allocation voting (ETH percent 0..100)
+export type AllocationVoteRecord = {
+  address: string
+  ethPercent: number // 0..100
+  weight: number
+  depositValueWei: string
+  depositValueEth: string
+  timestamp: number
+}
+
+function getAllocationRecordsKey(proposalId: string) {
+  return `allocvote:${proposalId}:records`
+}
+
+function getAllocationTotalsKey(proposalId: string) {
+  return `allocvote:${proposalId}:totals`
+}
+
+export async function recordAllocationVote(
+  proposalId: string,
+  vote: AllocationVoteRecord
+): Promise<void> {
+  const addressKey = vote.address.toLowerCase()
+  const recordsKey = getAllocationRecordsKey(proposalId)
+  const payload: AllocationVoteRecord = { ...vote, address: addressKey }
+  await redis.hset(recordsKey, { [addressKey]: JSON.stringify(payload) })
+}
+
+export async function getAllocationVoteRecord(
+  proposalId: string,
+  address: string
+): Promise<AllocationVoteRecord | null> {
+  const recordsKey = getAllocationRecordsKey(proposalId)
+  try {
+    const record = await redis.hget<string | AllocationVoteRecord>(recordsKey, address.toLowerCase())
+    if (!record) return null
+    if (typeof record === 'string') {
+      try {
+        return JSON.parse(record) as AllocationVoteRecord
+      } catch (error) {
+        console.error('Failed to parse allocation vote record:', error, record)
+        return null
+      }
+    }
+    if (record && typeof record === 'object') {
+      return record as AllocationVoteRecord
+    }
+    return null
+  } catch (error) {
+    console.error('Failed to get allocation vote record:', error)
+    return null
+  }
+}
+
+export async function getAllocationVoteResults(proposalId: string): Promise<{
+  totals: { weightedEthPercent: number; totalWeight: number; totalVoters: number }
+  votes: AllocationVoteRecord[]
+}> {
+  const totalsKey = getAllocationTotalsKey(proposalId)
+  const recordsKey = getAllocationRecordsKey(proposalId)
+
+  let voteRecordsRaw: Record<string, string | AllocationVoteRecord> | null = null
+  try {
+    voteRecordsRaw = await redis.hgetall<Record<string, string | AllocationVoteRecord>>(recordsKey)
+  } catch (error) {
+    console.error('Failed to get allocation vote records:', error)
+  }
+
+  const parsedVotes: AllocationVoteRecord[] = voteRecordsRaw && Object.keys(voteRecordsRaw).length > 0
+    ? Object.entries(voteRecordsRaw)
+        .map(([addressKey, value]) => {
+          if (typeof value === 'string') {
+            try {
+              const vote = JSON.parse(value) as AllocationVoteRecord
+              return { ...vote, address: addressKey }
+            } catch (error) {
+              console.error('Failed to parse allocation vote record:', error, value)
+              return null
+            }
+          }
+          if (value && typeof value === 'object') {
+            return { ...(value as AllocationVoteRecord), address: addressKey }
+          }
+          return null
+        })
+        .filter((vote): vote is AllocationVoteRecord => vote !== null)
+    : []
+
+  if (parsedVotes.length === 0) {
+    const emptyTotals = { weightedEthPercent: 0, totalWeight: 0, totalVoters: 0 }
+    await redis.hset(totalsKey, {
+      weightedEthPercent: '0',
+      totalWeight: '0',
+      totalVoters: '0',
+    })
+    return { totals: emptyTotals, votes: [] }
+  }
+
+  const userStats = await getAllUserStats()
+  const statsMap = new Map(userStats.map((stat) => [stat.address.toLowerCase(), stat]))
+
+  const totalDepositsWei = userStats.reduce((acc, stat) => {
+    try {
+      return acc + BigInt(stat.totalValueWei)
+    } catch {
+      return acc
+    }
+  }, BIGINT_ZERO)
+
+  let sumWeightedEthPercent = 0
+  let totalWeight = 0
+  let totalVoters = 0
+
+  const updatedVotes = parsedVotes.map((vote) => {
+    const address = vote.address.toLowerCase()
+    const stats = statsMap.get(address)
+
+    let depositWei = BIGINT_ZERO
+    if (stats) {
+      try {
+        depositWei = BigInt(stats.totalValueWei)
+      } catch {
+        depositWei = BIGINT_ZERO
+      }
+    }
+    if (depositWei === BIGINT_ZERO) {
+      try {
+        depositWei = BigInt(vote.depositValueWei)
+      } catch {
+        depositWei = BIGINT_ZERO
+      }
+    }
+
+    const weight = calculateDepositWeight(depositWei, totalDepositsWei)
+    const depositEth = formatEther(depositWei)
+
+    if (weight > 0) {
+      totalVoters += 1
+      totalWeight += weight
+      sumWeightedEthPercent += weight * (isFinite(vote.ethPercent) ? Math.max(0, Math.min(100, vote.ethPercent)) : 0)
+    }
+
+    return {
+      ...vote,
+      address,
+      weight,
+      depositValueWei: depositWei.toString(),
+      depositValueEth: depositEth,
+    }
+  })
+
+  const participationWeight = totalWeight > 1 ? 1 : totalWeight
+  const averageEthPercentRaw = totalWeight > 0 ? sumWeightedEthPercent / totalWeight : 0
+  const normalizedPercent = Number.isFinite(averageEthPercentRaw)
+    ? Math.max(0, Math.min(100, Number(averageEthPercentRaw.toFixed(4))))
+    : 0
+
+  if (updatedVotes.length > 0) {
+    const updates = updatedVotes.reduce<Record<string, string>>((acc, vote) => {
+      acc[vote.address.toLowerCase()] = JSON.stringify(vote)
+      return acc
+    }, {})
+    await redis.hset(recordsKey, updates)
+  }
+
+  await redis.hset(totalsKey, {
+    weightedEthPercent: normalizedPercent.toString(),
+    totalWeight: participationWeight.toString(),
+    totalVoters: totalVoters.toString(),
+  })
+
+  return {
+    totals: {
+      weightedEthPercent: normalizedPercent,
+      totalWeight: participationWeight,
+      totalVoters,
+    },
+    votes: updatedVotes,
+  }
+}
+
+export async function resetAllocationVotes(proposalId: string): Promise<void> {
+  const recordsKey = getAllocationRecordsKey(proposalId)
+  const totalsKey = getAllocationTotalsKey(proposalId)
+
+  try {
+    await redis.del(recordsKey, totalsKey)
+  } catch (error) {
+    console.error('Failed to reset allocation votes:', error)
+    throw error
+  }
+}
+

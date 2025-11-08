@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 function AssetIcon({ symbol }: { symbol: string }) {
   const upper = symbol.toUpperCase()
@@ -88,12 +88,21 @@ type VaultAssetsProps = {
   onSummaryUpdate?: (summary: { totalUsd: number; walletAddress: `0x${string}` | null }) => void
   onLoadingChange?: (loading: boolean) => void
   onAssetsUpdate?: (assets: any[]) => void
+  onConsensusUpdate?: (totals: ConsensusTotals) => void
 }
 
 type DisplayAsset = RawTreasuryAsset & {
   balanceDisplay: string
   share: number
 }
+
+type ConsensusTotals = {
+  weightedEthPercent: number
+  totalWeight: number
+  totalVoters: number
+}
+
+const MIN_SEGMENT_PERCENT = 20
 
 function formatUsd(value: number) {
   if (!Number.isFinite(value)) return '$0.00'
@@ -109,31 +118,19 @@ function formatTokenAmount(value: number, maximumFractionDigits = 6) {
   return value.toPrecision(4).replace(/0+$/, '').replace(/\.$/, '')
 }
 
-export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate }: VaultAssetsProps) {
+export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate, onConsensusUpdate }: VaultAssetsProps) {
   const [walletAddress, setWalletAddress] = useState<`0x${string}` | null>(null)
   const [assets, setAssets] = useState<DisplayAsset[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [totalUsd, setTotalUsd] = useState<number>(0)
+  const [voteTotals, setVoteTotals] = useState<ConsensusTotals | null>(null)
+  const [voteLoading, setVoteLoading] = useState(false)
+  const [voteError, setVoteError] = useState<string | null>(null)
 
   useEffect(() => {
     onSummaryUpdate?.({ totalUsd, walletAddress })
   }, [totalUsd, walletAddress, onSummaryUpdate])
-
-  const orderedAssets = useMemo(() => {
-    const preferredOrder = ['ETH', 'USDC']
-    return [...assets].sort((a, b) => {
-      const indexA = preferredOrder.indexOf(a.symbol.toUpperCase())
-      const indexB = preferredOrder.indexOf(b.symbol.toUpperCase())
-
-      const scoreA = indexA === -1 ? preferredOrder.length : indexA
-      const scoreB = indexB === -1 ? preferredOrder.length : indexB
-
-      if (scoreA !== scoreB) return scoreA - scoreB
-
-      return 0
-    })
-  }, [assets])
 
   const sanitizeAssets = useCallback((rawAssets: RawTreasuryAsset[], totalUsdValue: number): DisplayAsset[] => {
     return rawAssets.map((asset) => {
@@ -205,103 +202,164 @@ export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate }
     }
   }, [onSummaryUpdate, onLoadingChange, sanitizeAssets])
 
+  const loadConsensus = useCallback(async () => {
+    setVoteLoading(true)
+    setVoteError(null)
+
+    try {
+      const response = await fetch(`/api/vote?ts=${Date.now()}`, { cache: 'no-store' })
+      if (!response.ok) {
+        throw new Error('Unable to load vote totals.')
+      }
+
+      const json = await response.json()
+      if (!json?.ok || !json?.totals) {
+        throw new Error('Vote data unavailable.')
+      }
+
+      const normalizeNumber = (value: unknown) => {
+        if (typeof value === 'number') {
+          return Number.isFinite(value) ? value : 0
+        }
+        if (typeof value === 'string') {
+          const parsed = Number.parseFloat(value)
+          return Number.isFinite(parsed) ? parsed : 0
+        }
+        return 0
+      }
+
+      const totals: ConsensusTotals = {
+        weightedEthPercent: normalizeNumber(json.totals.weightedEthPercent),
+        totalWeight: normalizeNumber(json.totals.totalWeight),
+        totalVoters: Math.max(0, Math.round(normalizeNumber(json.totals.totalVoters))),
+      }
+
+      setVoteTotals(totals)
+      onConsensusUpdate?.(totals)
+    } catch (err) {
+      console.error('Failed to load vote totals', err)
+      setVoteTotals(null)
+      setVoteError(err instanceof Error ? err.message : 'Unable to load vote totals.')
+    } finally {
+      setVoteLoading(false)
+    }
+  }, [onConsensusUpdate])
+
   useEffect(() => {
     void loadTreasury()
-  }, [loadTreasury])
+    void loadConsensus()
+  }, [loadTreasury, loadConsensus])
 
   useEffect(() => {
     const handler = () => {
       void loadTreasury()
+      void loadConsensus()
     }
 
     window.addEventListener('deposit-confirmed', handler)
+    window.addEventListener('allocation-vote-updated', handler)
     return () => {
       window.removeEventListener('deposit-confirmed', handler)
+      window.removeEventListener('allocation-vote-updated', handler)
     }
-  }, [loadTreasury])
+  }, [loadTreasury, loadConsensus])
 
-  useEffect(() => {
-    const handleRefresh = () => {
-      if (document.hidden) return
-      void loadTreasury()
-    }
+  // Removed focus/visibility polling to avoid unexpected redraws during interaction
 
-    window.addEventListener('focus', handleRefresh)
-    document.addEventListener('visibilitychange', handleRefresh)
+  const showVoteSkeleton = voteLoading && !voteTotals
 
-    return () => {
-      window.removeEventListener('focus', handleRefresh)
-      document.removeEventListener('visibilitychange', handleRefresh)
-    }
-  }, [loadTreasury])
-
-  if (loading && assets.length === 0) {
+  if (showVoteSkeleton) {
     return (
       <div className="w-full">
-        <div className="mb-3 space-y-1 text-center">
-          <div className="animate-pulse h-4 rounded bg-muted w-48 mx-auto" />
-          <div className="animate-pulse h-4 rounded bg-muted w-40 mx-auto" />
-        </div>
         <div className="flex gap-1 w-full">
-          <div className="rounded-md border-2 px-2 py-3 text-xs" style={{ width: '34%' }}>
-            <div className="animate-pulse h-4 rounded bg-muted w-5/6" />
-            <div className="animate-pulse h-3 rounded bg-muted w-1/2 mt-2" />
-          </div>
-          <div className="rounded-md border-2 px-2 py-3 text-xs" style={{ width: '22%' }}>
-            <div className="animate-pulse h-4 rounded bg-muted w-4/5" />
-            <div className="animate-pulse h-3 rounded bg-muted w-1/2 mt-2" />
-          </div>
-          <div className="rounded-md border-2 px-2 py-3 text-xs" style={{ width: '16%' }}>
-            <div className="animate-pulse h-4 rounded bg-muted w-3/4" />
-            <div className="animate-pulse h-3 rounded bg-muted w-1/2 mt-2" />
-          </div>
-          <div className="rounded-md border-2 px-2 py-3 text-xs" style={{ width: '12%' }}>
-            <div className="animate-pulse h-4 rounded bg-muted w-2/3" />
-            <div className="animate-pulse h-3 rounded bg-muted w-1/2 mt-2" />
-          </div>
+          {[0, 1].map((key) => (
+            <div
+              key={key}
+              className="flex flex-1 flex-col items-center justify-center gap-2 rounded-md border px-2 py-3 text-xs"
+            >
+              <div className="animate-pulse h-5 w-5 rounded-full bg-muted" />
+              <div className="animate-pulse h-3 w-12 rounded bg-muted" />
+              <div className="animate-pulse h-3 w-10 rounded bg-muted" />
+            </div>
+          ))}
         </div>
+        <div className="mt-3 h-3 w-32 mx-auto rounded bg-muted animate-pulse" />
       </div>
     )
   }
 
-  if (error && assets.length === 0) {
-    return <div className="text-sm text-destructive">{error}</div>
+  if (voteError) {
+    return <div className="text-sm text-destructive">{voteError}</div>
   }
 
-  if (!walletAddress || assets.length === 0) {
-    return <div className="text-sm text-muted-foreground">No treasury assets detected yet.</div>
+  const effectiveTotals: ConsensusTotals = voteTotals ?? {
+    weightedEthPercent: 0,
+    totalWeight: 0,
+    totalVoters: 0,
+  }
+
+  const ethPercent = Math.max(0, Math.min(100, Math.round(effectiveTotals.weightedEthPercent)))
+  const usdcPercent = Math.max(0, Math.min(100, 100 - ethPercent))
+  const hasParticipation = effectiveTotals.totalWeight > 0
+
+  let displayEthWidth = hasParticipation ? Math.max(ethPercent, MIN_SEGMENT_PERCENT) : 50
+  let displayUsdcWidth = hasParticipation ? Math.max(usdcPercent, MIN_SEGMENT_PERCENT) : 50
+
+  if (hasParticipation) {
+    const totalWidth = displayEthWidth + displayUsdcWidth
+    if (totalWidth > 100) {
+      const excess = totalWidth - 100
+      if (displayEthWidth >= displayUsdcWidth) {
+        displayEthWidth = Math.max(MIN_SEGMENT_PERCENT, displayEthWidth - excess)
+      } else {
+        displayUsdcWidth = Math.max(MIN_SEGMENT_PERCENT, displayUsdcWidth - excess)
+      }
+    } else if (totalWidth < 100) {
+      const deficit = 100 - totalWidth
+      if (displayEthWidth >= displayUsdcWidth) {
+        displayEthWidth += deficit
+      } else {
+        displayUsdcWidth += deficit
+      }
+    }
   }
 
   return (
-    <div className="w-full">
-      {/* Percent-based containers */}
-      <div className="flex gap-1 w-full">
-        {orderedAssets.map((asset) => {
-          const share = asset.share > 0 ? asset.share : 0
-          const widthPercent = share > 0 ? Math.max(share * 100, 6) : 6
-
-          return (
-            <div
-              key={asset.id}
-              className="flex flex-col items-center justify-center gap-1 rounded-md border px-2 py-3 text-xs"
-              style={{
-                width: `${widthPercent}%`,
-                minWidth: '6%',
-                backgroundColor: asset.symbol.toUpperCase() === 'ETH' ? '#0000ff08' : '#3c8aff08',
-                borderColor: asset.symbol.toUpperCase() === 'ETH' ? '#0000ff20' : '#3c8aff20',
-              }}
-            >
-              <AssetIcon symbol={asset.symbol} />
-              <span className="text-xs font-semibold">
-                {asset.symbol}
-              </span>
-              <span className="text-xs font-medium">
-                {(share * 100).toFixed(1)}%
-              </span>
-            </div>
-          )
-        })}
+    <div className="w-full space-y-3">
+      <div className="flex w-full gap-1">
+        {[
+          { symbol: 'ETH', percent: ethPercent, accent: '#0000ff10', width: displayEthWidth },
+          { symbol: 'USDC', percent: usdcPercent, accent: '#3c8aff10', width: displayUsdcWidth },
+        ].map(({ symbol, percent, accent, width }) => (
+          <div
+            key={symbol}
+            className="flex flex-col items-center justify-center gap-1 rounded-md border px-2 py-3 text-xs transition-all duration-500"
+            style={{
+              backgroundColor: accent,
+              flex: '0 0 auto',
+              minWidth: `${MIN_SEGMENT_PERCENT}%`,
+              width: hasParticipation ? `${width}%` : '50%',
+              transitionProperty: 'width, background-color, transform',
+            }}
+          >
+            <AssetIcon symbol={symbol} />
+            <span className="text-xs font-semibold">{symbol}</span>
+            <span className="text-xs font-medium">
+              {hasParticipation ? `${Math.round(percent)}%` : '--'}
+            </span>
+          </div>
+        ))}
       </div>
+      {!hasParticipation && (
+        <div className="text-xs text-muted-foreground text-center">No votes recorded yet.</div>
+      )}
+      {error && (
+        <div className="text-xs text-muted-foreground text-center">
+          {assets.length === 0
+            ? 'Treasury balances unavailable. Consensus shown from voting data.'
+            : error}
+        </div>
+      )}
     </div>
   )
 }

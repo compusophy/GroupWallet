@@ -3,44 +3,61 @@ import { formatEther, isAddress, type Address, type Signature, verifyMessage } f
 
 import {
   getAllUserStats,
-  getVoteResults,
-  recordVote,
-  type VoteChoice,
-  type VoteRecord,
+  recordAllocationVote,
+  getAllocationVoteResults,
+  getAllocationVoteRecord,
+  resetAllocationVotes,
+  resetLegacyVoteData,
+  type AllocationVoteRecord,
 } from '@/lib/redis'
 import {
   calculateDepositWeight,
-  createVoteMessage,
+  createAllocationVoteMessage,
   VOTE_MESSAGE_EXPIRY_MS,
   VOTE_PROPOSAL_ID,
 } from '@/lib/voting'
 
 const BIGINT_ZERO = BigInt(0)
 
-function normalizeChoice(choice: string | undefined): VoteChoice | null {
-  if (!choice) return null
-  const lower = choice.toLowerCase()
-  if (lower === 'yes' || lower === 'no') {
-    return lower
+const shouldInitVotes = (process.env.VOTE_INIT ?? '').toLowerCase() === 'true'
+let voteInitPromise: Promise<void> | null = null
+
+async function ensureVotesInitialized() {
+  if (!shouldInitVotes) {
+    return
   }
-  return null
+
+  if (!voteInitPromise) {
+    voteInitPromise = (async () => {
+      try {
+        await resetAllocationVotes(VOTE_PROPOSAL_ID)
+        await resetLegacyVoteData(VOTE_PROPOSAL_ID)
+        console.info('[vote] Allocation votes reset due to VOTE_INIT=true')
+      } catch (error) {
+        console.error('Failed to reset allocation votes during init', error)
+      }
+    })()
+  }
+
+  await voteInitPromise
 }
 
 export async function GET(request: Request) {
   try {
+    await ensureVotesInitialized()
     const url = new URL(request.url)
     const addressParam = url.searchParams.get('address')
 
-    const { totals, votes } = await getVoteResults(VOTE_PROPOSAL_ID)
+    const { totals, votes } = await getAllocationVoteResults(VOTE_PROPOSAL_ID)
 
-    let userVote: VoteRecord | null = null
+    let userVote: AllocationVoteRecord | null = null
     let isEligible = false
     let depositValueWei = '0'
     let depositValueEth = '0'
 
     if (addressParam && isAddress(addressParam)) {
       const addressLower = addressParam.toLowerCase()
-      userVote = votes.find((vote) => vote.address === addressLower) ?? null
+      userVote = await getAllocationVoteRecord(VOTE_PROPOSAL_ID, addressLower)
 
       // Check eligibility
       const userStats = await getAllUserStats()
@@ -60,29 +77,45 @@ export async function GET(request: Request) {
       }
     }
 
-    return NextResponse.json({
-      ok: true,
-      proposalId: VOTE_PROPOSAL_ID,
-      totals,
-      votes,
-      userVote,
-      eligibility: {
-        isEligible,
-        depositValueWei,
-        depositValueEth,
-      },
-    })
+    return NextResponse.json({ ok: true, proposalId: VOTE_PROPOSAL_ID, totals, votes, userVote, eligibility: { isEligible, depositValueWei, depositValueEth } })
   } catch (error) {
     console.error('Failed to load vote results', error)
     return NextResponse.json({ ok: false, error: 'Failed to load vote results' }, { status: 500 })
   }
 }
 
+export async function DELETE(request: Request) {
+  try {
+    await ensureVotesInitialized()
+    const url = new URL(request.url)
+    const authHeader = request.headers.get('authorization')
+    const bearerToken = authHeader?.match(/Bearer\s+(.+)/i)?.[1] ?? null
+    const tokenParam = url.searchParams.get('token')
+    const providedToken = bearerToken ?? tokenParam ?? null
+    const requiredToken = process.env.VOTE_RESET_SECRET
+
+    if (requiredToken) {
+      if (!providedToken || providedToken !== requiredToken) {
+        return NextResponse.json({ ok: false, error: 'Unauthorized vote reset request.' }, { status: 401 })
+      }
+    } else if (process.env.NODE_ENV === 'production') {
+      return NextResponse.json({ ok: false, error: 'Vote reset disabled in production.' }, { status: 403 })
+    }
+
+    await resetAllocationVotes(VOTE_PROPOSAL_ID)
+    return NextResponse.json({ ok: true, proposalId: VOTE_PROPOSAL_ID })
+  } catch (error) {
+    console.error('Failed to reset allocation votes', error)
+    return NextResponse.json({ ok: false, error: 'Failed to reset votes.' }, { status: 500 })
+  }
+}
+
 export async function POST(request: Request) {
   try {
+    await ensureVotesInitialized()
     const body = (await request.json().catch(() => null)) as {
       address?: string
-      choice?: string
+      ethPercent?: number
       signature?: string
       timestamp?: number
     } | null
@@ -91,16 +124,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: 'Invalid request body.' }, { status: 400 })
     }
 
-    const { address, choice, signature, timestamp } = body
+    const { address, ethPercent, signature, timestamp } = body
 
     if (!address || !isAddress(address)) {
       return NextResponse.json({ ok: false, error: 'A valid address is required.' }, { status: 400 })
     }
 
-    const normalizedChoice = normalizeChoice(choice)
-    if (!normalizedChoice) {
-      return NextResponse.json({ ok: false, error: 'Invalid vote choice.' }, { status: 400 })
+    // Validate ethPercent 0..100
+    if (!Number.isFinite(ethPercent as number) || typeof ethPercent !== 'number') {
+      return NextResponse.json({ ok: false, error: 'Invalid allocation percent.' }, { status: 400 })
     }
+    const clampedPercent = Math.max(0, Math.min(100, Math.round(ethPercent)))
 
     if (!signature || typeof signature !== 'string') {
       return NextResponse.json({ ok: false, error: 'A signature is required.' }, { status: 400 })
@@ -115,10 +149,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: 'Vote signature is no longer valid.' }, { status: 400 })
     }
 
-    const expectedMessage = createVoteMessage({
+    const expectedMessage = createAllocationVoteMessage({
       proposalId: VOTE_PROPOSAL_ID,
       address: address as `0x${string}`,
-      choice: normalizedChoice,
+      ethPercent: clampedPercent,
       timestamp,
     })
 
@@ -175,18 +209,18 @@ export async function POST(request: Request) {
     const weight = calculateDepositWeight(voterDepositWei, totalDepositsWei)
     const depositValueEth = formatEther(voterDepositWei)
 
-    const voteRecord: VoteRecord = {
+    const voteRecord: AllocationVoteRecord = {
       address: address.toLowerCase(),
-      choice: normalizedChoice,
+      ethPercent: clampedPercent,
       weight,
       depositValueWei: voterDepositWei.toString(),
       depositValueEth,
       timestamp: now,
     }
 
-    await recordVote(VOTE_PROPOSAL_ID, voteRecord)
+    await recordAllocationVote(VOTE_PROPOSAL_ID, voteRecord)
 
-    const { totals, votes } = await getVoteResults(VOTE_PROPOSAL_ID)
+    const { totals, votes } = await getAllocationVoteResults(VOTE_PROPOSAL_ID)
     const addressLower = address.toLowerCase()
     const updatedUserVote = votes.find((vote) => vote.address === addressLower) ?? null
 

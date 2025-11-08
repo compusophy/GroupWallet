@@ -23,6 +23,9 @@ dependencies:
   '@wagmi/core':
     specifier: ^2.22.1
     version: 2.22.1(@types/react@18.3.26)(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.4.0)(viem@2.38.6)
+  canvas-confetti:
+    specifier: ^1.9.4
+    version: 1.9.4
   class-variance-authority:
     specifier: ^0.7.1
     version: 0.7.1
@@ -55,6 +58,9 @@ dependencies:
     version: 2.19.2(@tanstack/react-query@5.90.6)(@types/react@18.3.26)(@upstash/redis@1.35.6)(bufferutil@4.0.9)(encoding@0.1.13)(fastestsmallesttextencoderdecoder@1.0.22)(react@18.3.1)(supports-color@9.4.0)(typescript@5.9.3)(utf-8-validate@5.0.10)(viem@2.38.6)(ws@8.18.3)
 
 devDependencies:
+  '@types/canvas-confetti':
+    specifier: ^1.9.0
+    version: 1.9.0
   '@types/node':
     specifier: ^20.12.10
     version: 20.19.24
@@ -2349,6 +2355,10 @@ packages:
       react: 18.3.1
     dev: false
 
+  /@types/canvas-confetti@1.9.0:
+    resolution: {integrity: sha512-aBGj/dULrimR1XDZLtG9JwxX1b4HPRF6CX9Yfwh3NvstZEm1ZL7RBnel4keCPSqs1ANRu1u2Aoz9R+VmtjYuTg==}
+    dev: true
+
   /@types/connect@3.4.38:
     resolution: {integrity: sha512-K6uROf1LD88uDQqJCktA4yzL1YYAK6NgfsI0v/mTgyPKWsX1CnJ0XPSDhViejru1GcRkLWb8RlzFYJRqGUbaug==}
     dependencies:
@@ -3555,6 +3565,10 @@ packages:
 
   /caniuse-lite@1.0.30001753:
     resolution: {integrity: sha512-Bj5H35MD/ebaOV4iDLqPEtiliTN29qkGtEHCwawWn4cYm+bPJM2NsaP30vtZcnERClMzp52J4+aw2UNbK4o+zw==}
+
+  /canvas-confetti@1.9.4:
+    resolution: {integrity: sha512-yxQbJkAVrFXWNbTUjPqjF7G+g6pDotOUHGbkZq2NELZUMDpiJ85rIEazVb8GTaAptNW2miJAXbs1BtioA251Pw==}
+    dev: false
 
   /chalk@5.6.2:
     resolution: {integrity: sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA==}

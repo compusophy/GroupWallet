@@ -53,7 +53,7 @@ function formatUsd(value: number) {
 
 function formatPercentage(value: number) {
   if (!Number.isFinite(value)) return '0%'
-  return `${(value * 100).toFixed(1)}%`
+  return `${Math.round(value * 100)}%`
 }
 
 function getContrastingTextColor(color: string): string {

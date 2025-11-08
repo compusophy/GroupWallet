@@ -250,7 +250,7 @@ function VotingSectionContent() {
 
             {userVote && (
               <p className="text-xs text-muted-foreground">
-                Your vote: <span className="font-semibold uppercase">{userVote.choice}</span> · Weight:{' '}
+                Your vote: <span className="font-semibold uppercase">{userVote.choice}</span> · Voting power:{' '}
                 {formatPercentage(userVote.weight)} (based on {formatEthValue(userVote.depositValueEth)} ETH deposited)
               </p>
             )}
