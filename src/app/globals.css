@@ -57,3 +57,64 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Allocation slider styling */
+:root {
+  /* ETH and USDC brand-ish colors for the allocation slider */
+  --eth-color: #2563eb; /* Tailwind blue-600 */
+  --usdc-color: #2775ca; /* USDC blue */
+}
+
+.allocation-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 8px;
+  width: 100%;
+  border-radius: 9999px;
+  background: var(--track-bg, linear-gradient(to right, var(--eth-color) 0%, var(--eth-color) 50%, var(--usdc-color) 50%, var(--usdc-color) 100%));
+  outline: none;
+}
+
+.allocation-slider::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 9999px;
+  background: transparent; /* background handled on the input itself */
+}
+.allocation-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: var(--thumb-color, hsl(var(--primary)));
+  border: 2px solid hsl(var(--card));
+  margin-top: -5px; /* center thumb on 8px track */
+}
+
+.allocation-slider::-moz-range-track {
+  height: 8px;
+  border-radius: 9999px;
+  background: transparent; /* background handled on the input itself */
+}
+.allocation-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: var(--thumb-color, hsl(var(--primary)));
+  border: 2px solid hsl(var(--card));
+}
+
+.allocation-slider::-ms-track {
+  height: 8px;
+  border-radius: 9999px;
+  background: transparent;
+  border-color: transparent;
+  color: transparent;
+}
+.allocation-slider::-ms-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: var(--thumb-color, hsl(var(--primary)));
+  border: 2px solid hsl(var(--card));
+}

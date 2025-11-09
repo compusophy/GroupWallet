@@ -26,7 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { useCallback, useEffect, useState, lazy, Suspense } from 'react'
+import { useCallback, useEffect, useMemo, useState, lazy, Suspense } from 'react'
 import { base } from 'wagmi/chains'
 
 // Lazy load dialog components for better initial load performance
@@ -470,6 +470,22 @@ function App() {
   const shareMultiplier = userStats.percentage / 100
   const shareTotalUsd = vaultAssets.reduce((acc, asset) => acc + asset.usdValue * shareMultiplier, 0)
 
+  // Ensure ETH is shown first, USDC second in asset lists (for both summary and settle cards)
+  const assetsOrderedForDisplay = useMemo(() => {
+    const priority = (symbol: string) => {
+      const s = (symbol || '').toUpperCase()
+      if (s === 'ETH' || s === 'WETH') return 0
+      if (s === 'USDC' || s === 'USDBC') return 1
+      return 2
+    }
+    return [...vaultAssets].sort((a, b) => {
+      const pa = priority(a.symbol)
+      const pb = priority(b.symbol)
+      if (pa !== pb) return pa - pb
+      return 0
+    })
+  }, [vaultAssets])
+
   const hasConsensusPlan = Boolean(consensusTotals && consensusTotals.totalWeight > 0)
   const consensusEthPercent = hasConsensusPlan
     ? Math.max(0, Math.min(100, Math.round(consensusTotals!.weightedEthPercent)))
@@ -573,7 +589,7 @@ function App() {
 
               {!vaultLoading && vaultAssets.length > 0 && (
                 <div className="space-y-4">
-                  {vaultAssets.map((asset) => (
+                  {assetsOrderedForDisplay.map((asset) => (
                     <div key={`summary-${asset.id}`} className="flex justify-between items-center">
                       <span className="text-sm font-medium">
                         {formatTokenAmount(asset.balance)} {asset.symbol}
@@ -639,7 +655,10 @@ function App() {
                     setHasAdjustedSlider(true)
                     setSelectedEthPercent(Number(e.target.value))
                   }}
-                  className="w-full"
+                  className="allocation-slider w-full"
+                  style={{
+                    background: `linear-gradient(to right, var(--eth-color) 0%, var(--eth-color) ${selectedEthPercent}%, var(--usdc-color) ${selectedEthPercent}%, var(--usdc-color) 100%)`,
+                  }}
                 />
               </div>
 
@@ -808,27 +827,9 @@ function App() {
                     ) : (
                       <div className="space-y-4">
                         {vaultAssets.length > 0 ? (
-                          vaultAssets.map((asset) => {
-                            const upperSymbol = (asset.symbol || '').toUpperCase()
-                            const pricePerTokenUsd = asset.balance > 0 ? asset.usdValue / asset.balance : 0
-
+                          assetsOrderedForDisplay.map((asset) => {
                             let claimTokenAmount = asset.balance * shareMultiplier
                             let claimUsdAmount = asset.usdValue * shareMultiplier
-
-                            if (hasConsensusPlan && shareTotalUsd > 0 && consensusEthFraction !== null && consensusUsdcFraction !== null) {
-                              let consensusFraction: number | null = null
-                              if (upperSymbol === 'ETH' || upperSymbol === 'WETH') {
-                                consensusFraction = consensusEthFraction
-                              } else if (upperSymbol === 'USDC' || upperSymbol === 'USDBC') {
-                                consensusFraction = consensusUsdcFraction
-                              }
-
-                              if (consensusFraction !== null) {
-                                const targetUsd = shareTotalUsd * consensusFraction
-                                claimUsdAmount = targetUsd
-                                claimTokenAmount = pricePerTokenUsd > 0 ? targetUsd / pricePerTokenUsd : 0
-                              }
-                            }
 
                             return (
                               <div key={`share-${asset.id}`} className="flex justify-between items-center">
