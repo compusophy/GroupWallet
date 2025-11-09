@@ -1,42 +1,15 @@
-import { NextResponse } from 'next/server'
-import { base } from 'wagmi/chains'
-import {
-  Address,
-  Signature,
-  createPublicClient,
-  formatUnits,
-  getAddress,
-  http,
-  isAddress,
-  verifyMessage,
-  createWalletClient,
-  encodeFunctionData,
-  parseUnits,
-} from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
+import { randomUUID } from 'node:crypto'
 
-import { getAllUserStats } from '@/lib/redis'
+import { NextResponse } from 'next/server'
+import { Address, Signature, formatUnits, getAddress, isAddress, verifyMessage } from 'viem'
+
 import { CLAIM_MESSAGE_EXPIRY_MS, createClaimMessage } from '@/lib/claim'
-import { getTreasuryConfig, getTreasuryPrivateKey } from '@/lib/treasury'
+import { enqueueSettlement, type SettlementAssetPlan, type SettlementStatus } from '@/lib/settlement'
+import { getAllUserStats } from '@/lib/redis'
+import { fetchTreasuryState } from '@/lib/treasury-state'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
-
-const baseRpcUrl = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org'
-const EXECUTE_CLAIM = process.env.CLAIM_EXECUTE === 'true'
-
-const ERC20_ABI = [
-  {
-    type: 'function',
-    name: 'transfer',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'to', type: 'address' },
-      { name: 'value', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'bool' }],
-  },
-] as const
 
 export async function POST(request: Request) {
   try {
@@ -113,31 +86,11 @@ export async function POST(request: Request) {
 
     const share = Number(claimantWei) / Number(totalDepositsWei)
 
-    // Fetch current treasury balances
-    const config = getTreasuryConfig()
-    const publicClient = createPublicClient({ chain: base, transport: http(baseRpcUrl) })
-    const walletAddress = getAddress(config.address)
-
-    const balances = await Promise.all(
-      config.assets.map(async (asset) => {
-        if (asset.type === 'native') {
-          const bal = await publicClient.getBalance({ address: walletAddress })
-          return { asset, balance: bal }
-        }
-        if (!asset.address) return { asset, balance: BigInt(0) }
-        const balance = await publicClient.readContract({
-          address: getAddress(asset.address),
-          abi: [{ type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ name: 'account', type: 'address' }], outputs: [{ name: '', type: 'uint256' }] }] as const,
-          functionName: 'balanceOf',
-          args: [walletAddress],
-        })
-        return { asset, balance: (balance as bigint) ?? BigInt(0) }
-      }),
-    )
-
-    const plan = balances.map(({ asset, balance }) => {
-      const userAmountWei = BigInt(Math.floor(Number(balance) * share))
+    const treasuryState = await fetchTreasuryState()
+    const plan: SettlementAssetPlan[] = treasuryState.balances.map(({ asset, balance }) => {
+      const userAmountWei = (balance * claimantWei) / totalDepositsWei
       return {
+        assetId: asset.id,
         symbol: asset.symbol,
         type: asset.type,
         tokenAddress: asset.address ?? null,
@@ -147,46 +100,33 @@ export async function POST(request: Request) {
       }
     })
 
-    // Optionally execute transfers
-    let txs: Array<{ symbol: string; hash: string }> = []
-    if (EXECUTE_CLAIM) {
-      const pk = getTreasuryPrivateKey()
-      if (!pk) {
-        return NextResponse.json(
-          { ok: false, error: 'Server is not configured to execute claims.' },
-          { status: 500 },
-        )
-      }
-      const account = privateKeyToAccount(pk)
-      const walletClient = createWalletClient({ account, chain: base, transport: http(baseRpcUrl) })
+    const requestId = randomUUID()
+    const checksumAddress = getAddress(address)
+    const { status, queued } = await enqueueSettlement({
+      address: checksumAddress,
+      share,
+      plan,
+      totalDepositsWei: totalDepositsWei.toString(),
+      requestId,
+      requestedAt: Date.now(),
+    })
 
-      for (const p of plan) {
-        const amt = BigInt(p.amountWei)
-        if (amt === BigInt(0)) continue
-        if (p.type === 'native') {
-          const hash = await walletClient.sendTransaction({
-            to: address as Address,
-            value: amt,
-          })
-          txs.push({ symbol: p.symbol, hash })
-        } else if (p.tokenAddress) {
-          const data = encodeFunctionData({
-            abi: ERC20_ABI,
-            functionName: 'transfer',
-            args: [address as Address, amt],
-          })
-          const hash = await walletClient.sendTransaction({ to: p.tokenAddress as Address, data })
-          txs.push({ symbol: p.symbol, hash })
-        }
-      }
+    const modeMap: Record<SettlementStatus['state'], string> = {
+      'queued': 'queued',
+      'executing': 'pending',
+      'executed': 'executed',
+      'dry-run': 'dry-run',
+      'failed': 'failed',
     }
 
     return NextResponse.json({
       ok: true,
-      mode: EXECUTE_CLAIM ? 'executed' : 'quote',
+      mode: modeMap[status.state] ?? 'queued',
       share,
       plan,
-      transactions: txs,
+      settlement: status,
+      queued,
+      transactions: status.transactions ?? [],
     })
   } catch (error) {
     console.error('Failed to process claim:', error)

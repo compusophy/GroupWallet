@@ -158,6 +158,11 @@ function App() {
     setVaultAssets(assets)
   }, [])
 
+  const [vaultRefreshKey, setVaultRefreshKey] = useState(0)
+  const triggerVaultRefresh = useCallback(() => {
+    setVaultRefreshKey(prev => prev + 1)
+  }, [])
+
   useEffect(() => {
     if (hasAdjustedSlider || initialSliderSynced) return
     const totals = consensusTotals
@@ -276,6 +281,10 @@ function App() {
   const [analyticsDialogOpen, setAnalyticsDialogOpen] = useState(false)
   const [claiming, setClaiming] = useState(false)
   const [claimResult, setClaimResult] = useState<null | { mode: 'quote' | 'executed'; share: number; plan: Array<{ symbol: string; amountFormatted: string }>; transactions?: Array<{ symbol: string; hash: string }> }>(null)
+  const [swapPending, setSwapPending] = useState(false)
+  const [swapResult, setSwapResult] = useState<null | { ok: boolean; txHash?: string; error?: string }>(null)
+  const [rebalancePending, setRebalancePending] = useState(false)
+  const [rebalanceResult, setRebalanceResult] = useState<null | { ok: boolean; message?: string; error?: string }>(null)
 
   // Preload components on hover for faster dialog opening
   const preloadAnalytics = () => {
@@ -606,12 +615,13 @@ function App() {
             <div className="absolute inset-x-0 top-1/2 -translate-y-1/2">
               <div className="bg-card rounded-lg border p-4 space-y-4">
               <div className="mt-1">
-                <VaultAssets
-                  onSummaryUpdate={handleVaultSummaryUpdate}
-                  onLoadingChange={setVaultLoading}
-                  onAssetsUpdate={handleVaultAssetsUpdate}
-                  onConsensusUpdate={setConsensusTotals}
-                />
+                  <VaultAssets
+                    key={vaultRefreshKey}
+                    onSummaryUpdate={handleVaultSummaryUpdate}
+                    onLoadingChange={setVaultLoading}
+                    onAssetsUpdate={handleVaultAssetsUpdate}
+                    onConsensusUpdate={setConsensusTotals}
+                  />
               </div>
 
               {/* Slider to pick ETH/USDC ratio */}
@@ -694,6 +704,86 @@ function App() {
                       ? 'Vote'
                       : 'Connect to vote'}
               </Button>
+
+              <Button
+                type="button"
+                className="w-full"
+                disabled={swapPending}
+                onClick={async () => {
+                  setSwapResult(null)
+                  setSwapPending(true)
+                  try {
+                    const res = await fetch('/api/swap', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ direction: 'usdc_to_eth', amount: '0.50' }),
+                    })
+                    const json = await res.json().catch(() => ({}))
+                    if (res.ok && json?.ok) {
+                      setSwapResult({ ok: true, txHash: json.txHash as string })
+                    } else {
+                      setSwapResult({ ok: false, error: (json?.error as string) || 'Swap failed' })
+                    }
+                  } catch (e) {
+                    setSwapResult({ ok: false, error: e instanceof Error ? e.message : 'Swap failed' })
+                  } finally {
+                    setSwapPending(false)
+                  }
+                }}
+              >
+                {swapPending ? 'Swapping…' : 'Test Swap (USDC → ETH $0.50)'}
+              </Button>
+              {swapResult && (
+                <div className="text-xs text-center text-muted-foreground">
+                  {swapResult.ok ? (
+                    <span>Swap sent: {swapResult.txHash?.slice(0, 10)}…</span>
+                  ) : (
+                    <span>Swap error: {swapResult.error}</span>
+                  )}
+                </div>
+              )}
+
+              <Button
+                type="button"
+                className="w-full"
+                disabled={rebalancePending}
+                onClick={async () => {
+                  setRebalanceResult(null)
+                  setRebalancePending(true)
+                  try {
+                    const res = await fetch('/api/rebalance?manual=true', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                    })
+                    const json = await res.json().catch(() => ({}))
+                    if (res.ok && json?.ok) {
+                      setRebalanceResult({ 
+                        ok: true, 
+                        message: json.outcome?.message || json.message || 'Rebalance completed successfully' 
+                      })
+                      // Trigger vault refresh to show updated balances
+                      setTimeout(() => triggerVaultRefresh(), 2000) // Wait 2s for transaction to be indexed
+                    } else {
+                      setRebalanceResult({ ok: false, error: (json?.error as string) || 'Rebalance failed' })
+                    }
+                  } catch (e) {
+                    setRebalanceResult({ ok: false, error: e instanceof Error ? e.message : 'Rebalance failed' })
+                  } finally {
+                    setRebalancePending(false)
+                  }
+                }}
+              >
+                {rebalancePending ? 'Rebalancing…' : 'Smart Swap to Consensus Rebalance'}
+              </Button>
+              {rebalanceResult && (
+                <div className="text-xs text-center text-muted-foreground">
+                  {rebalanceResult.ok ? (
+                    <span>{rebalanceResult.message || 'Rebalance completed'}</span>
+                  ) : (
+                    <span>Rebalance error: {rebalanceResult.error}</span>
+                  )}
+                </div>
+              )}
 
               </div>
             </div>

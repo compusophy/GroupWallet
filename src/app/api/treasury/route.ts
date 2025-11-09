@@ -1,27 +1,13 @@
 import { NextResponse } from 'next/server'
 import { base } from 'wagmi/chains'
-import { createPublicClient, formatUnits, http, getAddress } from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
+import { formatUnits } from 'viem'
 
 import { getTreasuryConfig, getTreasuryPrivateKey, type TreasuryAssetConfig } from '@/lib/treasury'
+import { getPricesForAssets } from '@/lib/pricing'
+import { fetchTreasuryState } from '@/lib/treasury-state'
 
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
-
-// Base mainnet RPC endpoint - use BASE_RPC_URL if available, otherwise use public Base RPC
-const baseRpcUrl = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org'
-
-const ERC20_ABI = [
-  {
-    type: 'function',
-    name: 'balanceOf',
-    stateMutability: 'view',
-    inputs: [{ name: 'account', type: 'address' }],
-    outputs: [{ name: 'balance', type: 'uint256' }],
-  },
-] as const
-
-type PriceMap = Record<string, number>
 
 type BalanceSnapshot = {
   blockNumber: string | null
@@ -34,40 +20,6 @@ type BalanceSnapshot = {
 
 let lastSnapshot: BalanceSnapshot | null = null
 
-async function fetchPrices(priceIds: string[]): Promise<PriceMap> {
-  if (priceIds.length === 0) {
-    return {}
-  }
-
-  const uniqueIds = Array.from(new Set(priceIds))
-  const url = `https://coins.llama.fi/prices/current/${uniqueIds.join(',')}`
-
-  try {
-    const response = await fetch(url, { next: { revalidate: 60 } })
-    if (!response.ok) {
-      throw new Error(`Failed to load prices (${response.status})`)
-    }
-
-    const json = (await response.json()) as { coins?: Record<string, { price?: number }> }
-    const result: PriceMap = {}
-
-    if (!json.coins) {
-      return result
-    }
-
-    for (const [id, payload] of Object.entries(json.coins)) {
-      if (payload?.price && Number.isFinite(payload.price)) {
-        result[id] = payload.price
-      }
-    }
-
-    return result
-  } catch (error) {
-    console.error('Failed to fetch asset prices:', error)
-    return {}
-  }
-}
-
 export async function GET() {
   try {
     const config = getTreasuryConfig()
@@ -78,34 +30,12 @@ export async function GET() {
         { status: 500 }
       )
     }
-    const account = privateKey ? privateKeyToAccount(privateKey) : null
-    const walletAddress = account?.address ?? config.address
 
-    const client = createPublicClient({
-      chain: base,
-      transport: http(baseRpcUrl),
-    })
-
-    const checksummedWalletAddress = getAddress(walletAddress)
-
-    const [latestBlock, finalizedBlock] = await Promise.all([
-      client.getBlock({ blockTag: 'latest' }),
-      client
-        .getBlock({ blockTag: 'finalized' })
-        .catch((error) => {
-          console.warn('Failed to load finalized block. Falling back to latest.', error)
-          return null
-        }),
-    ])
-
-    const blockNumber = latestBlock.number
-    const blockHash = latestBlock.hash
-    const blockTimestamp = latestBlock.timestamp
-
-    const finalizedBlockNumber = finalizedBlock?.number ?? null
+    const treasuryState = await fetchTreasuryState()
+    const { blockNumber, blockHash, blockTimestamp, finalizedBlockNumber, balances: rawBalances, walletAddress } = treasuryState
 
     console.log('Fetching treasury balances', {
-      walletAddress: checksummedWalletAddress,
+      walletAddress,
       latestBlockNumber: typeof blockNumber === 'bigint' ? blockNumber.toString() : null,
       latestBlockHash: blockHash,
       latestBlockTimestamp: typeof blockTimestamp === 'bigint' ? Number(blockTimestamp) : null,
@@ -114,73 +44,11 @@ export async function GET() {
       lastSnapshot,
     })
 
-    const rawBalances = await Promise.all(
-      config.assets.map(async (asset) => {
-        try {
-          if (asset.type === 'native') {
-            const balance = await client.getBalance({ address: checksummedWalletAddress })
-            console.log('Loaded native balance', {
-              symbol: asset.symbol,
-              balance: balance.toString(),
-              formatted: formatUnits(balance, asset.decimals),
-            })
-            return { asset, balance }
-          }
-
-          if (!asset.address) {
-            return { asset, balance: BigInt(0) }
-          }
-
-          const checksummedTokenAddress = getAddress(asset.address)
-
-          // Check if address is a contract before calling balanceOf
-          try {
-            const code = await client.getBytecode({ address: checksummedTokenAddress })
-            if (!code || code === '0x') {
-              console.warn(`Token ${asset.symbol} at ${checksummedTokenAddress} is not a contract`)
-              return { asset, balance: BigInt(0) }
-            }
-          } catch (err) {
-            console.warn(`Failed to check bytecode for ${asset.symbol} at ${checksummedTokenAddress}:`, err)
-            // If we can't check, try the balanceOf call anyway
-          }
-
-          const balance = await client.readContract({
-            address: checksummedTokenAddress,
-            abi: ERC20_ABI,
-            functionName: 'balanceOf',
-            args: [checksummedWalletAddress],
-          })
-
-          console.log('Loaded token balance', {
-            symbol: asset.symbol,
-            balance: balance.toString(),
-            formatted: formatUnits(balance, asset.decimals),
-            blockNumber: typeof blockNumber === 'bigint' ? blockNumber.toString() : null,
-          })
-          return { asset, balance: balance ?? BigInt(0) }
-        } catch (error: any) {
-          // Log all errors for debugging, but still return BigInt(0) to not break the API
-          const isZeroDataError = error?.shortMessage?.includes('returned no data') || 
-                                  error?.cause?.shortMessage?.includes('returned no data')
-          
-          console.error(`Failed to load balance for ${asset.symbol} (${asset.address}):`, {
-            error: error?.shortMessage || error?.message || error,
-            isZeroDataError,
-            walletAddress: checksummedWalletAddress,
-            tokenAddress: asset.address,
-          })
-          
-          return { asset, balance: BigInt(0) }
-        }
-      })
-    )
-
-    const priceMap = await fetchPrices(config.assets.map((asset) => asset.priceId))
+    const priceSnapshots = await getPricesForAssets(config.assets.map((asset) => asset.id))
 
     const breakdown = rawBalances.map(({ asset, balance }) => {
       const normalized = Number.parseFloat(formatUnits(balance, asset.decimals))
-      const price = priceMap[asset.priceId] ?? 0
+      const price = priceSnapshots.get(asset.id)?.priceUsd ?? 0
       const usdValue = normalized * price
 
       return {
@@ -250,7 +118,7 @@ export async function GET() {
       : null
 
     console.log('Computed treasury snapshot', {
-      walletAddress: checksummedWalletAddress,
+      walletAddress,
       blockNumber: snapshot.blockNumber,
       totalUsd,
       assets: breakdownWithShare.map((item) => ({
@@ -267,7 +135,7 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: true,
-        walletAddress: checksummedWalletAddress,
+        walletAddress,
         chainId: base.id,
         totalValueUsd: totalUsd,
         assets: breakdownWithShare,

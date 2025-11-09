@@ -634,3 +634,28 @@ export async function resetAllocationVotes(proposalId: string): Promise<void> {
   }
 }
 
+export async function removeAllocationVote(proposalId: string, address: string): Promise<void> {
+  const recordsKey = getAllocationRecordsKey(proposalId)
+  try {
+    await redis.hdel(recordsKey, address.toLowerCase())
+    await getAllocationVoteResults(proposalId)
+  } catch (error) {
+    console.error('Failed to remove allocation vote record:', error)
+    throw error
+  }
+}
+
+export async function markUserSettled(address: string): Promise<void> {
+  const userStatsKey = `user:stats:${address.toLowerCase()}`
+  const timestamp = Date.now().toString()
+  try {
+    await redis.hset(userStatsKey, {
+      totalValueWei: '0',
+      settledAt: timestamp,
+    })
+  } catch (error) {
+    console.error('Failed to mark user as settled:', error)
+    throw error
+  }
+}
+

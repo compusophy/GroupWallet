@@ -69,6 +69,21 @@ Create a `.env` file at the project root:
 # Base RPC endpoint used by server-side viem clients
 BASE_RPC_URL=https://mainnet.base.org
 
+# Chainlink price feed addresses (Base mainnet)
+CHAINLINK_FEED_ETH=0xYourEthUsdFeedAddress
+CHAINLINK_FEED_USDC=0xYourUsdcUsdFeedAddress
+
+# Rebalance execution controls
+REBALANCE_EXECUTE=false
+REBALANCE_SLIPPAGE_BPS=50
+REBALANCE_MIN_USD_DELTA=5
+REBALANCE_TOLERANCE_PERCENT=1
+ZEROX_BASE_URL=https://base.api.0x.org
+# Optional if you have a 0x API key
+ZEROX_API_KEY=
+CLAIM_EXECUTE=false
+SETTLEMENT_HISTORY_LIMIT=50
+
 # Treasury wallet private key (server only). Used to derive the vault address when
 # TARGET_RECIPIENT is not provided. Never expose to the client.
 TREASURY_PRIVATE_KEY=0xexample...
@@ -93,7 +108,22 @@ ETH_PRICE_USD=3000
 | Variable | Required | Scope | Description |
 |----------|----------|-------|-------------|
 | `BASE_RPC_URL` | ✅ | Server | RPC endpoint for finalized balance reads |
+| `CHAINLINK_FEED_ETH` | ✅ | Server | Chainlink ETH/USD aggregator address on Base |
+| `CHAINLINK_FEED_USDC` | ✅ | Server | Chainlink USDC/USD (or equivalent stable) aggregator address on Base |
+| `REBALANCE_EXECUTE` | ⚪ | Server | Set to `true` to allow automated treasury rebalances |
+| `REBALANCE_SLIPPAGE_BPS` | ⚪ | Server | Max slippage for swaps (basis points, default 50 = 0.5%) |
+| `REBALANCE_MIN_USD_DELTA` | ⚪ | Server | Minimum USD delta required before rebalancing |
+| `REBALANCE_TOLERANCE_PERCENT` | ⚪ | Server | Percentage band around target allocation that is treated as balanced |
+| `ZEROX_BASE_URL` | ⚪ | Server | 0x Swap API base URL (defaults to Base mainnet endpoint) |
+| `ZEROX_API_KEY` | ⚪ | Server | Optional 0x API key for higher rate limits |
+| `CLAIM_EXECUTE` | ⚪ | Server | Set to `true` to allow settlement worker to transfer funds |
+| `SETTLEMENT_HISTORY_LIMIT` | ⚪ | Server | Number of settlement history items to keep in Redis |
 | `TREASURY_PRIVATE_KEY` | ✅* | Server | Private key for deriving vault address (*required unless `TARGET_RECIPIENT` is set) |
+### Background Workers
+
+- `POST /api/rebalance`: process the next queued rebalance job. Configure a cron or manual trigger after deposits/votes.
+- `POST /api/settlement`: process the next queued settlement job. Requires `CLAIM_EXECUTE=true` and treasury private key on the server.
+
 | `TARGET_RECIPIENT` | ⚪ | Server | Explicit vault recipient address |
 | `NEXT_PUBLIC_SEND_AMOUNT_ETH` | ⚪ | Client | Minimum ETH amount for deposit flow |
 | `NEXT_PUBLIC_SEND_CONFIRMATIONS` | ⚪ | Client | Confirmation threshold before recording a deposit |

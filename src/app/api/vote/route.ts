@@ -10,6 +10,7 @@ import {
   resetLegacyVoteData,
   type AllocationVoteRecord,
 } from '@/lib/redis'
+import { enqueueRebalance } from '@/lib/rebalance'
 import {
   calculateDepositWeight,
   createAllocationVoteMessage,
@@ -223,6 +224,12 @@ export async function POST(request: Request) {
     const { totals, votes } = await getAllocationVoteResults(VOTE_PROPOSAL_ID)
     const addressLower = address.toLowerCase()
     const updatedUserVote = votes.find((vote) => vote.address === addressLower) ?? null
+
+    try {
+      await enqueueRebalance('vote', { address: addressLower })
+    } catch (error) {
+      console.warn('Failed to enqueue rebalance after vote', error)
+    }
 
     return NextResponse.json({
       ok: true,

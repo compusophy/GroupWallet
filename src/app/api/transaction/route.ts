@@ -12,9 +12,9 @@ import {
 } from 'viem'
 
 import { recordSuccessfulTransaction } from '@/lib/redis'
+import { enqueueRebalance } from '@/lib/rebalance'
 import { getTreasuryAddress } from '@/lib/treasury'
 
-const DEFAULT_BASE_RPC_URL = 'https://mainnet.base.org'
 const DEFAULT_SEND_AMOUNT_ETH = '0.0001'
 const DEFAULT_CONFIRMATIONS = 1
 const BIGINT_ZERO = BigInt(0)
@@ -23,7 +23,7 @@ const MAX_RECEIPT_RETRIES = 5
 const MAX_TRANSACTION_RETRIES = 5
 const RETRY_DELAY_MS = 1500
 
-const baseRpcUrl = process.env.BASE_RPC_URL ?? DEFAULT_BASE_RPC_URL
+const baseRpcUrl = process.env.BASE_RPC_URL!
 const requiredAmountEth = process.env.NEXT_PUBLIC_SEND_AMOUNT_ETH ?? DEFAULT_SEND_AMOUNT_ETH
 const requiredAmountWei = parseEther(requiredAmountEth)
 const parsedConfirmations = Number(
@@ -243,6 +243,12 @@ export async function POST(request: Request) {
       // Log Redis errors but don't fail the API response
       // The transaction is still valid, we just couldn't record it
       console.error('Failed to record transaction in Redis:', redisError)
+    }
+
+    try {
+      await enqueueRebalance('deposit', { hash })
+    } catch (error) {
+      console.warn('Failed to enqueue rebalance after deposit', error)
     }
 
     return NextResponse.json({ ok: true, hash })
