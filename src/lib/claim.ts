@@ -8,7 +8,6 @@ export type ClaimMessagePayload = {
 export function createClaimMessage(payload: ClaimMessagePayload): string {
   const { address, timestamp } = payload
   return [
-    'wagmi-claim',
     `address:${address.toLowerCase()}`,
     `timestamp:${timestamp}`,
   ].join('\n')

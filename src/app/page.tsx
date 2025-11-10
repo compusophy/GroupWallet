@@ -26,7 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { useCallback, useEffect, useMemo, useState, lazy, Suspense } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
 import { base } from 'wagmi/chains'
 
 // Lazy load dialog components for better initial load performance
@@ -96,7 +96,6 @@ function normalizeConsensusTotals(input: any): ConsensusTotals {
 
 function createClaimMessage(address: `0x${string}`, timestamp: number) {
     return [
-      'wagmi-claim',
       `address:${address.toLowerCase()}`,
       `timestamp:${timestamp}`,
     ].join('\n')
@@ -113,6 +112,7 @@ function App() {
   const [vaultTotalUsd, setVaultTotalUsd] = useState(0)
   const [vaultAssets, setVaultAssets] = useState<any[]>([])
   const [userStats, setUserStats] = useState<{ totalValueEth: string; percentage: number }>({ totalValueEth: '0', percentage: 0 })
+  const [hasSettled, setHasSettled] = useState(false)
   const [vaultCopied, setVaultCopied] = useState(false)
   const [vaultLoading, setVaultLoading] = useState(true)
   const [selectedEthPercent, setSelectedEthPercent] = useState<number>(50)
@@ -160,10 +160,26 @@ function App() {
 
   const [vaultRefreshKey, setVaultRefreshKey] = useState(0)
   const triggerVaultRefresh = useCallback(() => {
+    // Dispatch event to trigger vault refresh without remounting component
+    // This prevents white flash while ensuring data refreshes
+    window.dispatchEvent(new Event('vault-refresh-requested'))
     setVaultRefreshKey(prev => prev + 1)
   }, [])
 
+  // Check if user has contributions (not settled and has percentage > 0)
+  // Calculate this early so it can be used in useEffect hooks
+  const hasContributions = !hasSettled && (userStats.percentage > 0 || parseFloat(userStats.totalValueEth) > 0)
+
   useEffect(() => {
+    // If user has no contributions, always sync slider to consensus (even if they've adjusted it before)
+    if (!hasContributions && consensusTotals && consensusTotals.totalWeight > 0) {
+      const pct = Math.max(0, Math.min(100, Math.round(consensusTotals.weightedEthPercent)))
+      setSelectedEthPercent(pct)
+      setInitialSliderSynced(true)
+      return
+    }
+    
+    // Otherwise, only sync if user hasn't adjusted slider yet
     if (hasAdjustedSlider || initialSliderSynced) return
     const totals = consensusTotals
     if (totals && totals.totalWeight > 0) {
@@ -171,7 +187,7 @@ function App() {
       setSelectedEthPercent(pct)
       setInitialSliderSynced(true)
     }
-  }, [consensusTotals, hasAdjustedSlider, initialSliderSynced])
+  }, [consensusTotals, hasAdjustedSlider, initialSliderSynced, hasContributions, hasSettled, userStats.percentage, userStats.totalValueEth])
 
   useEffect(() => {
     if (hasAdjustedSlider || initialSliderSynced) return
@@ -187,12 +203,25 @@ function App() {
   const fetchUserStats = useCallback(async () => {
     if (!account?.addresses?.[0]) {
       setUserStats({ totalValueEth: '0', percentage: 0 })
+      setHasSettled(false)
       return
     }
 
     try {
-      const voteResponse = await fetch(`/api/vote?address=${account.addresses[0]}`, { cache: 'no-store' })
-      const analyticsResponse = await fetch('/api/analytics', { cache: 'no-store' })
+      const [voteResponse, analyticsResponse, settlementResponse] = await Promise.all([
+        fetch(`/api/vote?address=${account.addresses[0]}`, { cache: 'no-store' }),
+        fetch('/api/analytics', { cache: 'no-store' }),
+        fetch(`/api/settlement-status?address=${account.addresses[0]}`, { cache: 'no-store' }),
+      ])
+
+      // Check settlement status, but still fetch user stats to check for new contributions
+      let wasSettled = false
+      if (settlementResponse.ok) {
+        const settlementData = await settlementResponse.json()
+        if (settlementData.ok && settlementData.status?.executed) {
+          wasSettled = true
+        }
+      }
 
       if (!voteResponse.ok || !analyticsResponse.ok) {
         return
@@ -216,9 +245,23 @@ function App() {
         const totalDeposits = parseFloat(analyticsData.totalDeposits?.eth || '0')
         const percentage = totalDeposits > 0 ? (userDeposits / totalDeposits) * 100 : 0
 
+        // If user has new contributions after settlement, they can settle again
+        // Set hasSettled based on whether they have contributions or not
+        if (wasSettled && userDeposits > 0) {
+          // User made new contributions after settling - allow them to interact
+          setHasSettled(false)
+        } else if (wasSettled && userDeposits === 0) {
+          // User previously settled and has no new contributions
+          setHasSettled(true)
+        } else {
+          // User hasn't settled or settlement status not found
+          setHasSettled(false)
+        }
+
         setUserStats({ totalValueEth: userDepositEth, percentage })
       } else {
         setUserStats({ totalValueEth: '0', percentage: 0 })
+        setHasSettled(false)
       }
     } catch (error) {
       console.error('Failed to fetch user stats:', error)
@@ -281,10 +324,159 @@ function App() {
   const [analyticsDialogOpen, setAnalyticsDialogOpen] = useState(false)
   const [claiming, setClaiming] = useState(false)
   const [claimResult, setClaimResult] = useState<null | { mode: 'quote' | 'executed'; share: number; plan: Array<{ symbol: string; amountFormatted: string }>; transactions?: Array<{ symbol: string; hash: string }> }>(null)
+  const [simpleSending, setSimpleSending] = useState(false)
+  const [simpleSendResult, setSimpleSendResult] = useState<null | { ok: boolean; txHash?: string; error?: string }>(null)
+  const [simpleSendingUsdc, setSimpleSendingUsdc] = useState(false)
+  const [simpleSendUsdcResult, setSimpleSendUsdcResult] = useState<null | { ok: boolean; txHash?: string; error?: string }>(null)
+  const [simpleSendingBatch, setSimpleSendingBatch] = useState(false)
+  const [simpleSendBatchResult, setSimpleSendBatchResult] = useState<null | { ok: boolean; txHash?: string; error?: string }>(null)
   const [swapPending, setSwapPending] = useState(false)
   const [swapResult, setSwapResult] = useState<null | { ok: boolean; txHash?: string; error?: string }>(null)
   const [rebalancePending, setRebalancePending] = useState(false)
   const [rebalanceResult, setRebalanceResult] = useState<null | { ok: boolean; message?: string; error?: string }>(null)
+  const [rebalanceProcessing, setRebalanceProcessing] = useState(false)
+  const voteFallbackTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const prevRebalanceProcessingRef = useRef<boolean>(false)
+  const vaultRefreshTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const waitingForVaultRefreshRef = useRef<boolean>(false)
+
+  // Listen to rebalance status via Server-Sent Events
+  useEffect(() => {
+    let eventSource: EventSource | null = null
+
+    try {
+      eventSource = new EventSource('/api/rebalance-status-stream')
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data?.ok) {
+            const isProcessing = data.processing === true
+            const wasProcessing = prevRebalanceProcessingRef.current
+            prevRebalanceProcessingRef.current = isProcessing
+            
+            // When operation starts (rebalance or settlement), reset vote submission state and clear fallback timeout
+            if (isProcessing) {
+              if (voteFallbackTimeoutRef.current) {
+                clearTimeout(voteFallbackTimeoutRef.current)
+                voteFallbackTimeoutRef.current = null
+              }
+              // Clear any pending vault refresh timeout
+              if (vaultRefreshTimeoutRef.current) {
+                clearTimeout(vaultRefreshTimeoutRef.current)
+                vaultRefreshTimeoutRef.current = null
+              }
+              waitingForVaultRefreshRef.current = false
+              setRebalanceProcessing(true)
+              setSubmittingAllocation(false)
+              setVotePhase('idle')
+              // Keep claiming state true during settlement processing - will be reset when operation completes
+            }
+            
+            // When rebalance completes (transitions from processing to not processing), refresh vault
+            if (wasProcessing && !isProcessing) {
+              // Keep UI locked and wait for vault refresh to complete
+              waitingForVaultRefreshRef.current = true
+              setRebalanceProcessing(true) // Keep locked until vault refresh completes
+              
+              // Rebalance just completed - refresh vault data after a short delay to allow blockchain to index
+              // Vault refresh must complete BEFORE confetti fires
+              vaultRefreshTimeoutRef.current = setTimeout(() => {
+                triggerVaultRefresh()
+                // Set a fallback timeout to unlock UI if vault refresh takes too long (10 seconds max)
+                vaultRefreshTimeoutRef.current = setTimeout(() => {
+                  if (waitingForVaultRefreshRef.current) {
+                    console.warn('Vault refresh timeout - unlocking UI')
+                    waitingForVaultRefreshRef.current = false
+                    setRebalanceProcessing(false)
+                  }
+                }, 10000) as unknown as NodeJS.Timeout
+              }, 2000) as unknown as NodeJS.Timeout // Wait 2s for transaction to be indexed
+            }
+          }
+        } catch (e) {
+          console.debug('Failed to parse rebalance status event:', e)
+        }
+      }
+
+      eventSource.onerror = (error) => {
+        console.debug('EventSource error, reconnecting...', error)
+        // EventSource will automatically reconnect
+      }
+    } catch (e) {
+      console.error('Failed to create EventSource:', e)
+    }
+
+    return () => {
+      if (eventSource) {
+        eventSource.close()
+      }
+      if (vaultRefreshTimeoutRef.current) {
+        clearTimeout(vaultRefreshTimeoutRef.current)
+      }
+    }
+  }, [triggerVaultRefresh, fireConfetti])
+
+  // Unlock UI when vault refresh completes (vaultLoading becomes false)
+  useEffect(() => {
+    // Only unlock if we're waiting for vault refresh after a rebalance
+    if (waitingForVaultRefreshRef.current && !vaultLoading) {
+      // Clear any pending timeout
+      if (vaultRefreshTimeoutRef.current) {
+        clearTimeout(vaultRefreshTimeoutRef.current)
+        vaultRefreshTimeoutRef.current = null
+      }
+      // Small delay to ensure UI has updated with new data and rectangles have animated
+      const unlockTimeout = setTimeout(() => {
+        waitingForVaultRefreshRef.current = false
+        setRebalanceProcessing(false)
+        setClaiming(false) // Reset claiming state when operations complete
+        // Refresh user stats after settlement/rebalance completes to update share display
+        void fetchUserStats()
+        // Fire confetti as the LAST step after vault refresh completes and rectangles have animated
+        // This ensures all users see confetti after balances are updated
+        console.log('[confetti] Vault refresh completed - firing confetti')
+        void fireConfetti()
+      }, 500) // Give time for rectangle animation to start
+      return () => clearTimeout(unlockTimeout)
+    }
+  }, [vaultLoading, fireConfetti, fetchUserStats])
+
+  // Helper function to trigger rebalance automatically
+  const triggerAutoRebalance = useCallback(async () => {
+    // Optimistically set rebalance processing for immediate UI feedback
+    // SSE stream will confirm actual status and handle vault refresh
+    setRebalanceProcessing(true)
+    
+    try {
+      const res = await fetch('/api/rebalance?manual=true', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || !json?.ok) {
+        // If rebalance didn't start (e.g., skipped), reset after a short delay
+        // SSE stream will also update this, but this is a fallback
+        setTimeout(() => {
+          // Only reset if SSE hasn't confirmed it's processing
+          // This prevents race conditions
+          if (!waitingForVaultRefreshRef.current) {
+            setRebalanceProcessing(false)
+          }
+        }, 1000)
+      }
+      // Vault refresh will be triggered by SSE stream when rebalance completes
+      // Don't show errors for auto-rebalance - it's optional and may skip if delta is too small
+    } catch (e) {
+      // Silently fail - auto-rebalance is best effort
+      // SSE stream will update status
+      console.debug('Auto-rebalance trigger failed (non-critical):', e)
+      // Reset if we're not waiting for vault refresh
+      if (!waitingForVaultRefreshRef.current) {
+        setRebalanceProcessing(false)
+      }
+    }
+  }, [])
 
   // Preload components on hover for faster dialog opening
   const preloadAnalytics = () => {
@@ -417,9 +609,13 @@ function App() {
 
         if (!cancelled) {
           setServerStatus('success')
-          void fireConfetti()
           // Dispatch event to notify voting section to refresh
           window.dispatchEvent(new Event('deposit-confirmed'))
+          // Refresh user stats to show new contributions
+          void fetchUserStats()
+          // Trigger automatic rebalance after deposit syncs
+          // Confetti will fire when rebalance completes (for all users)
+          void triggerAutoRebalance()
         }
       } catch (error) {
         console.error('Failed to notify server:', error)
@@ -439,7 +635,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [txHash, transactionReceipt, isReceiptSuccess, hasServerSynced, fireConfetti])
+  }, [txHash, transactionReceipt, isReceiptSuccess, hasServerSynced, fireConfetti, triggerAutoRebalance, fetchUserStats])
 
   const requiredAmountLabel = sendConfig?.valueEth ?? FALLBACK_SEND_AMOUNT
 
@@ -457,17 +653,22 @@ function App() {
   const isAwaitingConfirmation = Boolean(isWaitingForReceipt && txHash)
 
   // Optimistic button: show as Deposit by default, only change for connect/switch or explicit progress states
+  // Keep disabled during transaction, server sync, rebalance processing, vault loading, when no assets available
+  // When not connected, button shows "Connect Wallet" and is enabled to allow connection
   const depositButtonDisabled =
-    isSending || isAwaitingConfirmation || serverStatus === 'pending'
+    isSending || isAwaitingConfirmation || serverStatus === 'pending' || rebalanceProcessing || vaultLoading || vaultAssets.length === 0
 
   const depositButtonLabel = (() => {
+    if (!isConnected) return 'Connect Wallet'
     if (isSending) return 'Sending...'
     if (isAwaitingConfirmation) return 'Confirming...'
     if (serverStatus === 'pending') return 'Syncing...'
+    if (rebalanceProcessing) return 'Rebalancing...'
     return 'Contribute'
   })()
 
-  const shareMultiplier = userStats.percentage / 100
+  // If user has settled, show zero share
+  const shareMultiplier = hasSettled ? 0 : userStats.percentage / 100
   const shareTotalUsd = vaultAssets.reduce((acc, asset) => acc + asset.usdValue * shareMultiplier, 0)
 
   // Ensure ETH is shown first, USDC second in asset lists (for both summary and settle cards)
@@ -492,6 +693,11 @@ function App() {
     : null
   const consensusEthFraction = consensusEthPercent !== null ? consensusEthPercent / 100 : null
   const consensusUsdcFraction = consensusEthFraction !== null ? Math.max(0, Math.min(1, 1 - consensusEthFraction)) : null
+  
+  // Use consensus value for slider when user has no contributions (disabled state)
+  const sliderDisplayValue = !hasContributions && consensusEthPercent !== null 
+    ? consensusEthPercent 
+    : selectedEthPercent
 
   const handleCopyAddress = () => {
     const address = account.addresses?.[0]
@@ -510,6 +716,13 @@ function App() {
     const message = createClaimMessage(addr, timestamp)
     setClaimResult(null)
     setClaiming(true)
+    
+    // Set a timeout fallback to reset claiming state if settlement takes too long (30 seconds)
+    const claimingTimeoutRef = setTimeout(() => {
+      console.warn('[claim] Claiming timeout - resetting button state')
+      setClaiming(false)
+    }, 30000)
+    
     try {
       const signature = await signMessageAsync({ message })
       const res = await fetch('/api/claim', {
@@ -519,15 +732,47 @@ function App() {
       })
       const json = await res.json()
       if (!res.ok || !json?.ok) {
-        throw new Error(json?.error || 'Claim failed')
+        const errorMessage = json?.error || 'Settlement failed'
+        if (res.status === 429) {
+          // Lock conflict - show user-friendly message
+          alert(errorMessage + ' Please wait a moment and try again.')
+        }
+        throw new Error(errorMessage)
       }
       const plan = (json.plan as Array<{ symbol: string; amountFormatted: string }> | undefined) ?? []
-      setClaimResult({ mode: json.mode, share: json.share, plan, transactions: json.transactions })
+      const transactions = (json.transactions as Array<{ symbol: string; hash: string }> | undefined) ?? []
+      setClaimResult({ 
+        mode: json.mode, 
+        share: json.share, 
+        plan, 
+        transactions 
+      })
+      
+      // Reset claiming state based on settlement mode:
+      // - If already executed: reset immediately and mark as settled (no rebalance needed)
+      // - If queued but not processed: reset immediately (will be processed by worker, rebalance stream will handle UI)
+      // - If executed just now: keep claiming true, rebalance stream will reset it
+      if (json.mode === 'executed') {
+        clearTimeout(claimingTimeoutRef)
+        setClaiming(false)
+        setHasSettled(true)
+        setUserStats({ totalValueEth: '0', percentage: 0 })
+        // Settlement is complete - refresh user stats to clear share display
+        void fetchUserStats()
+      } else if (json.mode === 'queued') {
+        clearTimeout(claimingTimeoutRef)
+        setClaiming(false)
+        // Job will be processed by worker and rebalance stream will handle UI updates
+      } else {
+        // For 'pending' or 'dry-run', keep claiming true - rebalance stream will handle it
+        // Clear timeout when rebalance stream completes
+        // The timeout is a fallback in case rebalance stream doesn't fire
+      }
     } catch (e) {
-      console.error('Claim failed', e)
+      console.error('Settlement failed', e)
+      clearTimeout(claimingTimeoutRef)
       setClaimResult({ mode: 'quote', share: 0, plan: [] })
-    } finally {
-      setClaiming(false)
+      setClaiming(false) // Reset on error
     }
   }
 
@@ -580,28 +825,43 @@ function App() {
             <div className="absolute inset-x-0 top-0">
               <div className="bg-card rounded-lg border p-4 space-y-4">
               <div className="mt-1 text-center">
-                {vaultLoading ? (
+                {vaultLoading && vaultTotalUsd === 0 ? (
                   <Skeleton className="h-8 w-24 mx-auto" />
                 ) : (
                   <span className="text-3xl font-semibold">{formatUsd(vaultTotalUsd)}</span>
                 )}
               </div>
 
-              {!vaultLoading && vaultAssets.length > 0 && (
+              {(vaultAssets.length > 0 || vaultLoading) ? (
                 <div className="space-y-4">
-                  {assetsOrderedForDisplay.map((asset) => (
+                  {(vaultAssets.length > 0 ? assetsOrderedForDisplay : [
+                    { id: 'eth-placeholder', symbol: 'ETH', balance: 0, usdValue: 0 },
+                    { id: 'usdc-placeholder', symbol: 'USDC', balance: 0, usdValue: 0 }
+                  ]).map((asset) => (
                     <div key={`summary-${asset.id}`} className="flex justify-between items-center">
-                      <span className="text-sm font-medium">
-                        {formatTokenAmount(asset.balance)} {asset.symbol}
-                      </span>
-                      <span className="text-sm text-muted-foreground">{formatUsd(asset.usdValue)}</span>
+                      {vaultLoading && vaultAssets.length === 0 ? (
+                        <>
+                          <Skeleton className="h-5 w-24" />
+                          <Skeleton className="h-5 w-16" />
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-sm font-medium">
+                            {formatTokenAmount(asset.balance)} {asset.symbol}
+                          </span>
+                          <span className="text-sm text-muted-foreground">{formatUsd(asset.usdValue)}</span>
+                        </>
+                      )}
                     </div>
                   ))}
                 </div>
+              ) : (
+                <div className="text-sm text-muted-foreground text-center">No assets available yet</div>
               )}
 
               <Button
                 type="button"
+                variant="default"
                 className="w-full"
                 disabled={depositButtonDisabled}
                 onClick={() => {
@@ -623,7 +883,7 @@ function App() {
                   void handleSendTransaction()
                 }}
               >
-                <span>{depositButtonLabel}</span>
+                {depositButtonLabel}
               </Button>
               </div>
             </div>
@@ -632,7 +892,6 @@ function App() {
               <div className="bg-card rounded-lg border p-4 space-y-4">
               <div className="mt-1">
                   <VaultAssets
-                    key={vaultRefreshKey}
                     onSummaryUpdate={handleVaultSummaryUpdate}
                     onLoadingChange={setVaultLoading}
                     onAssetsUpdate={handleVaultAssetsUpdate}
@@ -641,31 +900,59 @@ function App() {
               </div>
 
               {/* Slider to pick ETH/USDC ratio */}
-              <div className="mt-1 text-center text-sm text-muted-foreground">
-                {`ETH ${Math.round(selectedEthPercent)}% · USDC ${Math.round(100 - selectedEthPercent)}%`}
-              </div>
-              <div className="mt-1 px-1">
+              <div className="mt-1 mb-1 px-1 relative">
                 <input
                   type="range"
                   min={0}
                   max={100}
                   step={0.1}
-                  value={selectedEthPercent}
+                  value={sliderDisplayValue}
                   onChange={(e) => {
                     setHasAdjustedSlider(true)
                     setSelectedEthPercent(Number(e.target.value))
                   }}
+                  disabled={!isConnected || !hasContributions || vaultLoading || vaultAssets.length === 0 || rebalanceProcessing}
                   className="allocation-slider w-full"
                   style={{
-                    background: `linear-gradient(to right, var(--eth-color) 0%, var(--eth-color) ${selectedEthPercent}%, var(--usdc-color) ${selectedEthPercent}%, var(--usdc-color) 100%)`,
+                    background: `linear-gradient(to right, var(--eth-color) 0%, var(--eth-color) ${sliderDisplayValue}%, var(--usdc-color) ${sliderDisplayValue}%, var(--usdc-color) 100%)`,
+                    opacity: (!isConnected || !hasContributions || vaultLoading || vaultAssets.length === 0 || rebalanceProcessing) ? 0.5 : 1,
+                    cursor: (!isConnected || !hasContributions || vaultLoading || vaultAssets.length === 0 || rebalanceProcessing) ? 'not-allowed' : 'pointer',
                   }}
                 />
+                {/* Overlay text centered in each segment with background for legibility */}
+                <div className="absolute inset-0 pointer-events-none" style={{ paddingLeft: '4px', paddingRight: '4px' }}>
+                  {sliderDisplayValue > 8 && (
+                    <div 
+                      className="text-xs font-medium text-foreground absolute px-2 py-0.5 rounded-md border bg-background"
+                      style={{ 
+                        left: `${sliderDisplayValue / 2}%`,
+                        transform: 'translateX(-50%) translateY(-50%)',
+                        top: '50%'
+                      }}
+                    >
+                      ETH {Math.round(sliderDisplayValue)}%
+                    </div>
+                  )}
+                  {(100 - sliderDisplayValue) > 8 && (
+                    <div 
+                      className="text-xs font-medium text-foreground absolute px-2 py-0.5 rounded-md border bg-background"
+                      style={{ 
+                        left: `${sliderDisplayValue + (100 - sliderDisplayValue) / 2}%`,
+                        transform: 'translateX(-50%) translateY(-50%)',
+                        top: '50%'
+                      }}
+                    >
+                      USDC {Math.round(100 - sliderDisplayValue)}%
+                    </div>
+                  )}
+                </div>
               </div>
 
               <Button
                 type="button"
+                variant="default"
                 className="w-full"
-                disabled={vaultLoading || vaultAssets.length === 0 || submittingAllocation || votePhase !== 'idle'}
+                disabled={!isConnected || !hasContributions || vaultLoading || vaultAssets.length === 0 || submittingAllocation || votePhase !== 'idle' || rebalanceProcessing}
                 onClick={async () => {
                   if (!isConnected) {
                     setAccountDialogOpen(true)
@@ -702,184 +989,217 @@ function App() {
                         setConsensusTotals(normalizeConsensusTotals(json.totals))
                       }
                       window.dispatchEvent(new Event('allocation-vote-updated'))
-                      void fireConfetti()
+                      // Trigger automatic rebalance after vote
+                      // Confetti will fire when rebalance completes (for all users)
+                      // Keep submittingAllocation true - it will be reset when rebalanceProcessing becomes true via SSE
+                      void triggerAutoRebalance()
+                      // Set a timeout fallback in case rebalance doesn't start quickly (e.g., skipped due to small delta)
+                      // Clear any existing timeout first
+                      if (voteFallbackTimeoutRef.current) {
+                        clearTimeout(voteFallbackTimeoutRef.current)
+                      }
+                      voteFallbackTimeoutRef.current = setTimeout(() => {
+                        setSubmittingAllocation(false)
+                        setVotePhase('idle')
+                        voteFallbackTimeoutRef.current = null
+                      }, 2000) // 2 second fallback - SSE should update within 200-400ms
                     } else {
                       const message = json?.error || 'Allocation vote submission failed'
+                      if (res.status === 429) {
+                        // Lock conflict - show user-friendly message
+                        alert(message + ' Please wait a moment and try again.')
+                      }
                       console.error(message)
+                      setSubmittingAllocation(false)
+                      setVotePhase('idle')
                     }
                   } catch (e) {
                     console.error('Allocation vote failed', e)
-                  } finally {
                     setSubmittingAllocation(false)
                     setVotePhase('idle')
                   }
+                  // Note: submittingAllocation will be reset when rebalanceProcessing becomes true or after timeout
                 }}
               >
-                {votePhase === 'signing'
-                  ? 'Confirming...'
-                  : votePhase === 'posting'
-                    ? 'Syncing...'
-                    : isConnected
-                      ? 'Vote'
-                      : 'Connect to vote'}
+                {rebalanceProcessing
+                  ? 'Rebalancing...'
+                  : votePhase === 'signing'
+                    ? 'Confirming...'
+                    : votePhase === 'posting'
+                      ? 'Syncing...'
+                      : submittingAllocation
+                        ? 'Processing...'
+                        : 'Vote'}
               </Button>
 
-              <Button
-                type="button"
-                className="w-full"
-                disabled={swapPending}
-                onClick={async () => {
-                  setSwapResult(null)
-                  setSwapPending(true)
-                  try {
-                    const res = await fetch('/api/swap', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ direction: 'usdc_to_eth', amount: '0.50' }),
-                    })
-                    const json = await res.json().catch(() => ({}))
-                    if (res.ok && json?.ok) {
-                      setSwapResult({ ok: true, txHash: json.txHash as string })
-                    } else {
-                      setSwapResult({ ok: false, error: (json?.error as string) || 'Swap failed' })
-                    }
-                  } catch (e) {
-                    setSwapResult({ ok: false, error: e instanceof Error ? e.message : 'Swap failed' })
-                  } finally {
-                    setSwapPending(false)
-                  }
-                }}
-              >
-                {swapPending ? 'Swapping…' : 'Test Swap (USDC → ETH $0.50)'}
-              </Button>
-              {swapResult && (
-                <div className="text-xs text-center text-muted-foreground">
-                  {swapResult.ok ? (
-                    <span>Swap sent: {swapResult.txHash?.slice(0, 10)}…</span>
-                  ) : (
-                    <span>Swap error: {swapResult.error}</span>
+              {/* Dev tools - hidden for now */}
+              {false && process.env.NODE_ENV === 'development' && (
+                <>
+                  <Button
+                    type="button"
+                    className="w-full"
+                    disabled={swapPending || rebalanceProcessing}
+                    onClick={async () => {
+                      setSwapResult(null)
+                      setSwapPending(true)
+                      try {
+                        const res = await fetch('/api/swap', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ direction: 'usdc_to_eth', amount: '0.50' }),
+                        })
+                        const json = await res.json().catch(() => ({}))
+                        if (res.ok && json?.ok) {
+                          setSwapResult({ ok: true, txHash: json.txHash as string })
+                        } else {
+                          setSwapResult({ ok: false, error: (json?.error as string) || 'Swap failed' })
+                        }
+                      } catch (e) {
+                        setSwapResult({ ok: false, error: e instanceof Error ? e.message : 'Swap failed' })
+                      } finally {
+                        setSwapPending(false)
+                      }
+                    }}
+                  >
+                    {swapPending ? 'Swapping…' : 'Test Swap (USDC → ETH $0.50)'}
+                  </Button>
+                  {swapResult && (
+                    <div className="text-xs text-center text-muted-foreground">
+                      {swapResult?.ok ? (
+                        <span>Swap sent: {swapResult?.txHash?.slice(0, 10)}…</span>
+                      ) : (
+                        <span>Swap error: {swapResult?.error}</span>
+                      )}
+                    </div>
                   )}
-                </div>
-              )}
 
-              <Button
-                type="button"
-                className="w-full"
-                disabled={rebalancePending}
-                onClick={async () => {
-                  setRebalanceResult(null)
-                  setRebalancePending(true)
-                  try {
-                    const res = await fetch('/api/rebalance?manual=true', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                    })
-                    const json = await res.json().catch(() => ({}))
-                    if (res.ok && json?.ok) {
-                      setRebalanceResult({ 
-                        ok: true, 
-                        message: json.outcome?.message || json.message || 'Rebalance completed successfully' 
-                      })
-                      // Trigger vault refresh to show updated balances
-                      setTimeout(() => triggerVaultRefresh(), 2000) // Wait 2s for transaction to be indexed
-                    } else {
-                      setRebalanceResult({ ok: false, error: (json?.error as string) || 'Rebalance failed' })
-                    }
-                  } catch (e) {
-                    setRebalanceResult({ ok: false, error: e instanceof Error ? e.message : 'Rebalance failed' })
-                  } finally {
-                    setRebalancePending(false)
-                  }
-                }}
-              >
-                {rebalancePending ? 'Rebalancing…' : 'Smart Swap to Consensus Rebalance'}
-              </Button>
-              {rebalanceResult && (
-                <div className="text-xs text-center text-muted-foreground">
-                  {rebalanceResult.ok ? (
-                    <span>{rebalanceResult.message || 'Rebalance completed'}</span>
-                  ) : (
-                    <span>Rebalance error: {rebalanceResult.error}</span>
+                  <Button
+                    type="button"
+                    className="w-full"
+                    disabled={rebalancePending || rebalanceProcessing}
+                    onClick={async () => {
+                      setRebalanceResult(null)
+                      setRebalancePending(true)
+                      setRebalanceProcessing(true) // Set immediately for UI feedback
+                      try {
+                        const res = await fetch('/api/rebalance?manual=true', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                        })
+                        const json = await res.json().catch(() => ({}))
+                        if (res.ok && json?.ok) {
+                          setRebalanceResult({ 
+                            ok: true, 
+                            message: json.outcome?.message || json.message || 'Rebalance completed successfully' 
+                          })
+                          // Vault refresh will be triggered by SSE stream when rebalance completes
+                        } else {
+                          setRebalanceResult({ ok: false, error: (json?.error as string) || 'Rebalance failed' })
+                          // If rebalance failed, unlock UI immediately
+                          setRebalanceProcessing(false)
+                        }
+                      } catch (e) {
+                        setRebalanceResult({ ok: false, error: e instanceof Error ? e.message : 'Rebalance failed' })
+                        // If rebalance failed, unlock UI immediately
+                        setRebalanceProcessing(false)
+                      } finally {
+                        setRebalancePending(false)
+                        // Note: rebalanceProcessing will be cleared by SSE stream when job completes and vault refreshes
+                      }
+                    }}
+                  >
+                    {rebalancePending || rebalanceProcessing ? 'Rebalancing…' : 'Smart Swap to Consensus Rebalance'}
+                  </Button>
+                  {rebalanceResult && (
+                    <div className="text-xs text-center text-muted-foreground">
+                      {rebalanceResult?.ok ? (
+                        <span>{rebalanceResult?.message || 'Rebalance completed'}</span>
+                      ) : (
+                        <span>Rebalance error: {rebalanceResult?.error}</span>
+                      )}
+                    </div>
                   )}
-                </div>
+                </>
               )}
 
               </div>
             </div>
 
-            {isConnected && (
-              <>
-                <div className="absolute inset-x-0 bottom-0">
-                  <div className="bg-card rounded-lg border p-4 space-y-4">
-                  <div className="mt-1 text-center">
-                    {vaultLoading ? (
-                      <Skeleton className="h-8 w-24 mx-auto" />
-                    ) : (
-                      <span className="text-3xl font-semibold">{formatUsd(shareTotalUsd)}</span>
-                    )}
-                  </div>
+            <div className="absolute inset-x-0 bottom-0">
+              <div className="bg-card rounded-lg border p-4 space-y-4">
+                {isConnected ? (
+                  <>
+                    <div className="mt-1 text-center">
+                      {vaultLoading && shareTotalUsd === 0 ? (
+                        <Skeleton className="h-8 w-24 mx-auto" />
+                      ) : (
+                        <span className="text-3xl font-semibold">{formatUsd(shareTotalUsd)}</span>
+                      )}
+                    </div>
+                    <div className="space-y-4">
+                      {(vaultAssets.length > 0 || vaultLoading) ? (
+                        (vaultAssets.length > 0 ? assetsOrderedForDisplay : [
+                          { id: 'eth-placeholder', symbol: 'ETH', balance: 0, usdValue: 0 },
+                          { id: 'usdc-placeholder', symbol: 'USDC', balance: 0, usdValue: 0 }
+                        ]).map((asset) => {
+                          let claimTokenAmount = asset.balance * shareMultiplier
+                          let claimUsdAmount = asset.usdValue * shareMultiplier
+
+                          return (
+                            <div key={`share-${asset.id}`} className="flex justify-between items-center">
+                              {vaultLoading && vaultAssets.length === 0 ? (
+                                <>
+                                  <Skeleton className="h-5 w-24" />
+                                  <Skeleton className="h-5 w-16" />
+                                </>
+                              ) : (
+                                <>
+                                  <span className="text-sm font-medium">
+                                    {formatTokenAmount(claimTokenAmount)} {asset.symbol}
+                                  </span>
+                                  <span className="text-sm text-muted-foreground">{formatUsd(claimUsdAmount)}</span>
+                                </>
+                              )}
+                            </div>
+                          )
+                        })
+                      ) : (
+                        <div className="text-sm text-muted-foreground text-center">No assets available yet</div>
+                      )}
+
+                      <Button
+                        type="button"
+                        variant="default"
+                        className="w-full"
+                        disabled={!hasContributions || claiming || vaultLoading || vaultAssets.length === 0 || rebalanceProcessing || !isConnected}
+                        onClick={handleClaimShare}
+                      >
+                        {rebalanceProcessing ? 'Rebalancing…' : claiming ? 'Settling…' : 'Settle'}
+                      </Button>
+
+                    </div>
+                  </>
+                ) : (
                   <div className="space-y-4">
-                    {vaultLoading ? (
-                      <div className="space-y-2">
-                        <Skeleton className="h-5 w-32 mx-auto" />
-                        <Skeleton className="h-5 w-40 mx-auto" />
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        {vaultAssets.length > 0 ? (
-                          assetsOrderedForDisplay.map((asset) => {
-                            let claimTokenAmount = asset.balance * shareMultiplier
-                            let claimUsdAmount = asset.usdValue * shareMultiplier
-
-                            return (
-                              <div key={`share-${asset.id}`} className="flex justify-between items-center">
-                                <span className="text-sm font-medium">
-                                  {formatTokenAmount(claimTokenAmount)} {asset.symbol}
-                                </span>
-                                <span className="text-sm text-muted-foreground">{formatUsd(claimUsdAmount)}</span>
-                              </div>
-                            )
-                          })
-                        ) : (
-                          <div className="text-sm text-muted-foreground text-center">No assets available yet</div>
-                        )}
-                      </div>
-                    )}
-
+                    <div className="mt-1 text-center">
+                      <Skeleton className="h-8 w-24 mx-auto" />
+                    </div>
+                    <div className="space-y-4">
+                      <Skeleton className="h-5 w-24" />
+                      <Skeleton className="h-5 w-24" />
+                    </div>
                     <Button
                       type="button"
+                      variant="default"
                       className="w-full"
-                      disabled={claiming || vaultLoading || vaultAssets.length === 0}
-                      onClick={handleClaimShare}
+                      disabled={true}
                     >
-                    {claiming ? 'Processing…' : 'Settle'}
+                      {rebalanceProcessing ? 'Rebalancing…' : 'Settle'}
                     </Button>
-
-                    {claimResult && !vaultLoading && (
-                      <div className="space-y-1 text-center text-xs text-muted-foreground">
-                        <div>
-                          {claimResult.mode === 'executed' ? 'Settlement executed' : 'Settlement preview'} — share:{' '}
-                          {(claimResult.share * 100).toFixed(2)}%
-                        </div>
-                        {claimResult.plan.length > 0 && (
-                          <div className="space-y-1">
-                            {claimResult.plan.map((p, i) => (
-                              <div key={`claim-${p.symbol}-${i}`} className="flex justify-between">
-                                <span>{p.symbol}</span>
-                                <span>{p.amountFormatted}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
                   </div>
-                  </div>
-                </div>
-
-                {/* Allocation voting UI replaces previous yes/no card */}
-              </>
-            )}
+                )}
+              </div>
+            </div>
 
             {/* Voting section removed per new allocation voting design */}
           </div>

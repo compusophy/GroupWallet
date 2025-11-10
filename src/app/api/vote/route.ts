@@ -17,6 +17,7 @@ import {
   VOTE_MESSAGE_EXPIRY_MS,
   VOTE_PROPOSAL_ID,
 } from '@/lib/voting'
+import { acquireOperationLock } from '@/lib/locks'
 
 const BIGINT_ZERO = BigInt(0)
 
@@ -167,77 +168,90 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: false, error: 'Signature verification failed.' }, { status: 401 })
     }
 
-    const userStats = await getAllUserStats()
+    // Acquire lock to prevent concurrent vote operations
+    const lock = await acquireOperationLock('vote')
+    if (!lock.acquired) {
+      return NextResponse.json(
+        { ok: false, error: 'Another vote operation is in progress. Please try again in a moment.' },
+        { status: 429 }
+      )
+    }
 
-    const totalDepositsWei = userStats.reduce((acc, stat) => {
-      try {
-        return acc + BigInt(stat.totalValueWei)
-      } catch {
-        return acc
+    try {
+      const userStats = await getAllUserStats()
+
+      const totalDepositsWei = userStats.reduce((acc, stat) => {
+        try {
+          return acc + BigInt(stat.totalValueWei)
+        } catch {
+          return acc
+        }
+      }, BIGINT_ZERO)
+
+      if (totalDepositsWei === BIGINT_ZERO) {
+        return NextResponse.json(
+          { ok: false, error: 'Voting is not available yet. No deposits recorded.' },
+          { status: 400 }
+        )
       }
-    }, BIGINT_ZERO)
 
-    if (totalDepositsWei === BIGINT_ZERO) {
-      return NextResponse.json(
-        { ok: false, error: 'Voting is not available yet. No deposits recorded.' },
-        { status: 400 }
-      )
+      const voterRecord = userStats.find((stat) => stat.address === address.toLowerCase())
+
+      if (!voterRecord) {
+        return NextResponse.json(
+          { ok: false, error: 'Only depositors are eligible to vote.' },
+          { status: 403 }
+        )
+      }
+
+      let voterDepositWei: bigint
+      try {
+        voterDepositWei = BigInt(voterRecord.totalValueWei)
+      } catch {
+        voterDepositWei = BIGINT_ZERO
+      }
+
+      if (voterDepositWei === BIGINT_ZERO) {
+        return NextResponse.json(
+          { ok: false, error: 'You must have a positive deposit to vote.' },
+          { status: 403 }
+        )
+      }
+
+      const weight = calculateDepositWeight(voterDepositWei, totalDepositsWei)
+      const depositValueEth = formatEther(voterDepositWei)
+
+      const voteRecord: AllocationVoteRecord = {
+        address: address.toLowerCase(),
+        ethPercent: clampedPercent,
+        weight,
+        depositValueWei: voterDepositWei.toString(),
+        depositValueEth,
+        timestamp: now,
+      }
+
+      await recordAllocationVote(VOTE_PROPOSAL_ID, voteRecord)
+
+      const { totals, votes } = await getAllocationVoteResults(VOTE_PROPOSAL_ID)
+      const addressLower = address.toLowerCase()
+      const updatedUserVote = votes.find((vote) => vote.address === addressLower) ?? null
+
+      try {
+        await enqueueRebalance('vote', { address: addressLower })
+      } catch (error) {
+        console.warn('Failed to enqueue rebalance after vote', error)
+      }
+
+      return NextResponse.json({
+        ok: true,
+        proposalId: VOTE_PROPOSAL_ID,
+        totals,
+        votes,
+        userVote: updatedUserVote,
+      })
+    } finally {
+      await lock.release()
     }
-
-    const voterRecord = userStats.find((stat) => stat.address === address.toLowerCase())
-
-    if (!voterRecord) {
-      return NextResponse.json(
-        { ok: false, error: 'Only depositors are eligible to vote.' },
-        { status: 403 }
-      )
-    }
-
-    let voterDepositWei: bigint
-    try {
-      voterDepositWei = BigInt(voterRecord.totalValueWei)
-    } catch {
-      voterDepositWei = BIGINT_ZERO
-    }
-
-    if (voterDepositWei === BIGINT_ZERO) {
-      return NextResponse.json(
-        { ok: false, error: 'You must have a positive deposit to vote.' },
-        { status: 403 }
-      )
-    }
-
-    const weight = calculateDepositWeight(voterDepositWei, totalDepositsWei)
-    const depositValueEth = formatEther(voterDepositWei)
-
-    const voteRecord: AllocationVoteRecord = {
-      address: address.toLowerCase(),
-      ethPercent: clampedPercent,
-      weight,
-      depositValueWei: voterDepositWei.toString(),
-      depositValueEth,
-      timestamp: now,
-    }
-
-    await recordAllocationVote(VOTE_PROPOSAL_ID, voteRecord)
-
-    const { totals, votes } = await getAllocationVoteResults(VOTE_PROPOSAL_ID)
-    const addressLower = address.toLowerCase()
-    const updatedUserVote = votes.find((vote) => vote.address === addressLower) ?? null
-
-    try {
-      await enqueueRebalance('vote', { address: addressLower })
-    } catch (error) {
-      console.warn('Failed to enqueue rebalance after vote', error)
-    }
-
-    return NextResponse.json({
-      ok: true,
-      proposalId: VOTE_PROPOSAL_ID,
-      totals,
-      votes,
-      userVote: updatedUserVote,
-    })
   } catch (error) {
     console.error('Failed to record vote', error)
     return NextResponse.json({ ok: false, error: 'Failed to record vote.' }, { status: 500 })

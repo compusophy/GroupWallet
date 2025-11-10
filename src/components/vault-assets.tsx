@@ -160,6 +160,7 @@ export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate, 
     setLoading(true)
     onLoadingChange?.(true)
     setError(null)
+    // Don't clear assets - keep previous ones visible while loading to prevent white flash
 
     try {
       const response = await fetch(`/api/treasury?ts=${Date.now()}`, { cache: 'no-store' })
@@ -187,20 +188,24 @@ export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate, 
 
       setWalletAddress(json.walletAddress)
       setTotalUsd(recomputedTotal)
+      // Update assets smoothly - React will animate the width changes via CSS transition
       setAssets(normalizedAssets)
       onAssetsUpdate?.(normalizedAssets)
     } catch (err) {
       console.error('Failed to load treasury overview', err)
       setError(err instanceof Error ? err.message : 'Unable to load treasury balances.')
-      setWalletAddress(null)
-      setAssets([])
-      setTotalUsd(0)
-      onSummaryUpdate?.({ totalUsd: 0, walletAddress: null })
+      // Only clear assets on error if we don't have any existing assets
+      if (assets.length === 0) {
+        setWalletAddress(null)
+        setAssets([])
+        setTotalUsd(0)
+        onSummaryUpdate?.({ totalUsd: 0, walletAddress: null })
+      }
     } finally {
       setLoading(false)
       onLoadingChange?.(false)
     }
-  }, [onSummaryUpdate, onLoadingChange, sanitizeAssets])
+  }, [onSummaryUpdate, onLoadingChange, sanitizeAssets, assets.length, onAssetsUpdate])
 
   const loadConsensus = useCallback(async () => {
     setVoteLoading(true)
@@ -253,16 +258,34 @@ export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate, 
   useEffect(() => {
     const handler = () => {
       void loadTreasury()
+      // Don't reload consensus immediately - wait for rebalancing to complete
+      // Consensus will update when vault refreshes after rebalancing
       void loadConsensus()
+    }
+
+    const refreshHandler = () => {
+      // Trigger vault refresh when requested (e.g., after rebalancing completes)
+      void loadTreasury()
     }
 
     window.addEventListener('deposit-confirmed', handler)
     window.addEventListener('allocation-vote-updated', handler)
+    window.addEventListener('vault-refresh-requested', refreshHandler)
     return () => {
       window.removeEventListener('deposit-confirmed', handler)
       window.removeEventListener('allocation-vote-updated', handler)
+      window.removeEventListener('vault-refresh-requested', refreshHandler)
     }
   }, [loadTreasury, loadConsensus])
+  
+  // Update consensus when vault data loads (after rebalancing completes)
+  // This ensures rectangles animate smoothly when rebalancing finishes
+  useEffect(() => {
+    if (!loading && assets.length > 0) {
+      // Vault data just loaded - update consensus to match
+      void loadConsensus()
+    }
+  }, [loading, assets.length, loadConsensus])
 
   // Removed focus/visibility polling to avoid unexpected redraws during interaction
 
@@ -292,15 +315,17 @@ export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate, 
     return <div className="text-sm text-destructive">{voteError}</div>
   }
 
-  const effectiveTotals: ConsensusTotals = voteTotals ?? {
-    weightedEthPercent: 0,
-    totalWeight: 0,
-    totalVoters: 0,
-  }
-
-  const ethPercent = Math.max(0, Math.min(100, Math.round(effectiveTotals.weightedEthPercent)))
-  const usdcPercent = Math.max(0, Math.min(100, 100 - ethPercent))
-  const hasParticipation = effectiveTotals.totalWeight > 0
+  // Use actual vault asset shares instead of vote consensus for rectangles
+  // This ensures rectangles only update after rebalancing completes (when vault data refreshes)
+  // All clients will see the animation when rebalancing finishes
+  const ethAsset = assets.find((a) => (a.symbol || '').toUpperCase() === 'ETH' || (a.symbol || '').toUpperCase() === 'WETH')
+  const usdcAsset = assets.find((a) => (a.symbol || '').toUpperCase() === 'USDC' || (a.symbol || '').toUpperCase() === 'USDBC')
+  
+  const ethShare = ethAsset?.share ?? 0
+  const usdcShare = usdcAsset?.share ?? 0
+  const ethPercent = Math.max(0, Math.min(100, Math.round(ethShare * 100)))
+  const usdcPercent = Math.max(0, Math.min(100, Math.round(usdcShare * 100)))
+  const hasParticipation = assets.length > 0 && totalUsd > 0
 
   let displayEthWidth = hasParticipation ? Math.max(ethPercent, MIN_SEGMENT_PERCENT) : 50
   let displayUsdcWidth = hasParticipation ? Math.max(usdcPercent, MIN_SEGMENT_PERCENT) : 50
@@ -342,7 +367,6 @@ export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate, 
               transitionProperty: 'width, background-color, transform',
             }}
           >
-            <AssetIcon symbol={symbol} />
             <span className="text-xs font-semibold">{symbol}</span>
             <span className="text-xs font-medium">
               {hasParticipation ? `${Math.round(percent)}%` : '--'}
@@ -350,9 +374,6 @@ export function VaultAssets({ onSummaryUpdate, onLoadingChange, onAssetsUpdate, 
           </div>
         ))}
       </div>
-      {!hasParticipation && (
-        <div className="text-xs text-muted-foreground text-center">No votes recorded yet.</div>
-      )}
       {error && (
         <div className="text-xs text-muted-foreground text-center">
           {assets.length === 0

@@ -502,6 +502,13 @@ export async function getAllocationVoteResults(proposalId: string): Promise<{
   const totalsKey = getAllocationTotalsKey(proposalId)
   const recordsKey = getAllocationRecordsKey(proposalId)
 
+  // Periodic cleanup of stale votes (10% chance to avoid overhead)
+  if (Math.random() < 0.1) {
+    await cleanupStaleAllocationVotes(proposalId).catch((error) => {
+      console.warn('[redis] Failed to cleanup stale votes during getResults', error)
+    })
+  }
+
   let voteRecordsRaw: Record<string, string | AllocationVoteRecord> | null = null
   try {
     voteRecordsRaw = await redis.hgetall<Record<string, string | AllocationVoteRecord>>(recordsKey)
@@ -637,11 +644,93 @@ export async function resetAllocationVotes(proposalId: string): Promise<void> {
 export async function removeAllocationVote(proposalId: string, address: string): Promise<void> {
   const recordsKey = getAllocationRecordsKey(proposalId)
   try {
-    await redis.hdel(recordsKey, address.toLowerCase())
-    await getAllocationVoteResults(proposalId)
+    const addressLower = address.toLowerCase()
+    console.log('[redis] Removing allocation vote', { proposalId, address: addressLower })
+    await redis.hdel(recordsKey, addressLower)
+    
+    // Recalculate consensus totals (this will exclude the removed vote and recalculate weights)
+    const results = await getAllocationVoteResults(proposalId)
+    console.log('[redis] Vote removed, consensus recalculated', {
+      newTotalVoters: results.totals.totalVoters,
+      newTotalWeight: results.totals.totalWeight,
+      newWeightedEthPercent: results.totals.weightedEthPercent,
+    })
   } catch (error) {
     console.error('Failed to remove allocation vote record:', error)
     throw error
+  }
+}
+
+/**
+ * Clean up stale allocation votes - removes votes from users with zero contributions
+ * or users who have settled (with no new contributions)
+ * Returns the number of votes cleaned up
+ */
+export async function cleanupStaleAllocationVotes(proposalId: string): Promise<number> {
+  try {
+    const recordsKey = getAllocationRecordsKey(proposalId)
+    const voteRecordsRaw = await redis.hgetall<Record<string, string | AllocationVoteRecord>>(recordsKey)
+    
+    if (!voteRecordsRaw || Object.keys(voteRecordsRaw).length === 0) {
+      return 0
+    }
+
+    const userStats = await getAllUserStats()
+    const statsMap = new Map(userStats.map((stat) => [stat.address.toLowerCase(), stat]))
+    
+    // Check for settled users
+    const { loadUserStatus } = await import('./settlement')
+    
+    const staleAddresses: string[] = []
+    
+    for (const [addressKey, voteRaw] of Object.entries(voteRecordsRaw)) {
+      try {
+        // Check if user has contributions
+        const stats = statsMap.get(addressKey)
+        const hasContributions = stats && BigInt(stats.totalValueWei) > BIGINT_ZERO
+        
+        // Check if user has settled (and has no new contributions)
+        let hasSettled = false
+        try {
+          const settlementStatus = await loadUserStatus(addressKey)
+          if (settlementStatus?.state === 'executed') {
+            // Check if they have new contributions after settlement
+            if (!hasContributions) {
+              hasSettled = true
+            }
+          }
+        } catch {
+          // If we can't check settlement status, continue
+        }
+        
+        // Remove vote if user has no contributions or has settled with no new contributions
+        if (!hasContributions || hasSettled) {
+          staleAddresses.push(addressKey)
+        }
+      } catch (error) {
+        // If we can't parse the vote, mark it as stale
+        console.warn('[redis] Failed to process vote for cleanup', { addressKey, error })
+        staleAddresses.push(addressKey)
+      }
+    }
+    
+    if (staleAddresses.length === 0) {
+      return 0
+    }
+    
+    // Remove stale votes
+    await redis.hdel(recordsKey, ...staleAddresses)
+    
+    console.info('[redis] Cleaned up stale allocation votes', {
+      proposalId,
+      removed: staleAddresses.length,
+      addresses: staleAddresses,
+    })
+    
+    return staleAddresses.length
+  } catch (error) {
+    console.error('[redis] Failed to cleanup stale allocation votes', { proposalId, error })
+    return 0
   }
 }
 
@@ -649,10 +738,13 @@ export async function markUserSettled(address: string): Promise<void> {
   const userStatsKey = `user:stats:${address.toLowerCase()}`
   const timestamp = Date.now().toString()
   try {
+    // Clear all contribution stats - set to 0 so user shows 0 contribution and nothing to claim
     await redis.hset(userStatsKey, {
       totalValueWei: '0',
+      totalTransactions: '0',
       settledAt: timestamp,
     })
+    console.log('[redis] Marked user as settled', { address, timestamp })
   } catch (error) {
     console.error('Failed to mark user as settled:', error)
     throw error

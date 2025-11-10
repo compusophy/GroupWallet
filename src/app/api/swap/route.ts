@@ -107,7 +107,7 @@ export async function POST(request: Request) {
     const account = privateKeyToAccount(privateKey)
 
     const walletClient = createWalletClient({
-      account,
+      account: account as any, // Type assertion to work around viem version mismatch
       chain: base,
       transport: http(baseRpcUrl),
     })
@@ -164,9 +164,9 @@ export async function POST(request: Request) {
 
     // Approve USDC for AllowanceHolder if needed (selling USDC)
     const spender = quote.issues?.allowance?.spender
-    if (direction === 'usdc_to_eth' && spender) {
+    if (direction === 'usdc_to_eth' && spender && walletClient.account) {
       const approveHash = await walletClient.writeContract({
-        account,
+        account: walletClient.account as any, // Type assertion to work around viem version mismatch
         chain: base,
         address: USDC_ADDRESS,
         abi: ERC20_ABI,
@@ -176,8 +176,15 @@ export async function POST(request: Request) {
       await publicClient.waitForTransactionReceipt({ hash: approveHash })
     }
 
+    if (!walletClient.account) {
+      return NextResponse.json(
+        { ok: false, error: 'Wallet client account is not available.' },
+        { status: 500 }
+      )
+    }
+
     const txHash = await walletClient.sendTransaction({
-      account,
+      account: walletClient.account as any, // Type assertion to work around viem version mismatch
       chain: base,
       to: getAddress(quote.transaction.to),
       data: quote.transaction.data,

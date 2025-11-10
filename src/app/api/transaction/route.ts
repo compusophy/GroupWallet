@@ -14,6 +14,7 @@ import {
 import { recordSuccessfulTransaction } from '@/lib/redis'
 import { enqueueRebalance } from '@/lib/rebalance'
 import { getTreasuryAddress } from '@/lib/treasury'
+import { acquireOperationLock } from '@/lib/locks'
 
 const DEFAULT_SEND_AMOUNT_ETH = '0.0001'
 const DEFAULT_CONFIRMATIONS = 1
@@ -216,42 +217,55 @@ export async function POST(request: Request) {
       expectedChainId: base.id,
     })
 
-    // Record successful transaction in Redis
-    try {
-      // Fetch block to get timestamp
-      const block = await publicClient.getBlock({
-        blockNumber: receipt.blockNumber,
-      })
-
-      const blockTimestamp = Number(block.timestamp) * 1000 // Convert to milliseconds
-
-      await recordSuccessfulTransaction({
-        hash,
-        from: transaction.from,
-        to: transaction.to ?? '',
-        value: transaction.value.toString(),
-        valueEth: formatEther(transaction.value),
-        blockNumber: receipt.blockNumber.toString(),
-        blockHash: receipt.blockHash,
-        timestamp: blockTimestamp,
-        chainId: base.id,
-        confirmations: confirmationCount ?? undefined,
-      })
-
-      console.log('Transaction recorded successfully:', hash)
-    } catch (redisError) {
-      // Log Redis errors but don't fail the API response
-      // The transaction is still valid, we just couldn't record it
-      console.error('Failed to record transaction in Redis:', redisError)
+    // Acquire lock to prevent concurrent transaction processing
+    const lock = await acquireOperationLock('transaction', transaction.from)
+    if (!lock.acquired) {
+      return NextResponse.json(
+        { ok: false, error: 'Another transaction is being processed. Please try again in a moment.' },
+        { status: 429 }
+      )
     }
 
     try {
-      await enqueueRebalance('deposit', { hash })
-    } catch (error) {
-      console.warn('Failed to enqueue rebalance after deposit', error)
-    }
+      // Record successful transaction in Redis
+      try {
+        // Fetch block to get timestamp
+        const block = await publicClient.getBlock({
+          blockNumber: receipt.blockNumber,
+        })
 
-    return NextResponse.json({ ok: true, hash })
+        const blockTimestamp = Number(block.timestamp) * 1000 // Convert to milliseconds
+
+        await recordSuccessfulTransaction({
+          hash,
+          from: transaction.from,
+          to: transaction.to ?? '',
+          value: transaction.value.toString(),
+          valueEth: formatEther(transaction.value),
+          blockNumber: receipt.blockNumber.toString(),
+          blockHash: receipt.blockHash,
+          timestamp: blockTimestamp,
+          chainId: base.id,
+          confirmations: confirmationCount ?? undefined,
+        })
+
+        console.log('Transaction recorded successfully:', hash)
+      } catch (redisError) {
+        // Log Redis errors but don't fail the API response
+        // The transaction is still valid, we just couldn't record it
+        console.error('Failed to record transaction in Redis:', redisError)
+      }
+
+      try {
+        await enqueueRebalance('deposit', { hash })
+      } catch (error) {
+        console.warn('Failed to enqueue rebalance after deposit', error)
+      }
+
+      return NextResponse.json({ ok: true, hash })
+    } finally {
+      await lock.release()
+    }
   } catch (error) {
     console.error('Failed to handle transaction notification', error)
     return NextResponse.json(
