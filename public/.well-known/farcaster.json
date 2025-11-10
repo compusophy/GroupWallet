@@ -1,12 +1,17 @@
 {
+  "accountAssociation": {
+    "header": "eyJmaWQiOjM1MDkxMSwidHlwZSI6ImN1c3RvZHkiLCJrZXkiOiIweDJGREVmM0Y0NzBlQ2QyQmM5YTk3NzU2OEM0M0FEMzg2MGMxNjExRDgifQ",
+    "payload": "eyJkb21haW4iOiJjb21wdS1jdXN0b20taG9va3MudmVyY2VsLmFwcCJ9",
+    "signature": "oWn2S2P3n1yiXGJKiGVXtn8Tb7wjTmwqiUL10kMP1q8iqNdNDvMPNcsiPk+sCN8n+G32DsCzXs6ZnSO5ifxB0Bw="
+  },
   "miniapp": {
     "version": "1",
     "name": "GroupWallet",
-    "iconUrl": "https://compu-custom-hooks.vercel.app/icon.png",
+    "iconUrl": "https://compu-custom-hooks.vercel.app/image.png",
     "homeUrl": "https://compu-custom-hooks.vercel.app/",
     "imageUrl": "https://compu-custom-hooks.vercel.app/image.png",
     "buttonTitle": "Open App",
-    "splashImageUrl": "https://placehold.co/200x200.png",
+    "splashImageUrl": "https://compu-custom-hooks.vercel.app/image.png",
     "splashBackgroundColor": "#ffffff",
     "requiredChains": [
       "eip155:8453"
@@ -14,7 +19,30 @@
     "requiredCapabilities": [
       "wallet.getEthereumProvider",
       "actions.ready"
-    ]
+    ],
+    "subtitle": "Group treasury and voting",
+    "description": "Collaborative treasury management with voting and rebalancing.",
+    "screenshotUrls": [
+      "https://compu-custom-hooks.vercel.app/image.png",
+      "https://compu-custom-hooks.vercel.app/image.png",
+      "https://compu-custom-hooks.vercel.app/image.png"
+    ],
+    "primaryCategory": "social",
+    "tags": [
+      "wallet",
+      "treasury",
+      "voting",
+      "group",
+      "defi"
+    ],
+    "heroImageUrl": "https://compu-custom-hooks.vercel.app/image.png",
+    "tagline": "Group treasury and voting",
+    "ogTitle": "GroupWallet",
+    "ogDescription": "Collaborative treasury management with voting and rebalancing.",
+    "ogImageUrl": "https://compu-custom-hooks.vercel.app/image.png"
+  },
+  "baseBuilder": {
+    "ownerAddress": "0x95F2a3aB6B8ac496e12EF2fE0F6b406e870cD4CD"
   }
 }
 
